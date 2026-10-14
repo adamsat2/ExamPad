@@ -1,6 +1,6 @@
 //
 //  AssessmentManager.swift
-//  DigitalExamNotebook
+//  ExamPad
 //
 
 

@@ -1,6 +1,6 @@
 //
 //  ExamSessionModel.swift
-//  DigitalExamNotebook
+//  ExamPad
 //
 
 import Foundation

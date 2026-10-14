@@ -1,6 +1,6 @@
 //
-//  DigitalExamNotebookApp.swift
-//  DigitalExamNotebook
+//  ExamPadApp.swift
+//  ExamPad
 //
 
 
@@ -8,7 +8,7 @@ import SwiftUI
 import SwiftData
 
 @main
-struct DigitalExamNotebookApp: App {
+struct ExamPadApp: App {
     @StateObject private var viewModel = ExamFlowViewModel()
         @StateObject private var assessmentManager = AssessmentManager()
         

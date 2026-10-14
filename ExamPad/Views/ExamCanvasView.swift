@@ -1,6 +1,6 @@
 //
 //  ExamCanvasView.swift
-//  DigitalExamNotebook
+//  ExamPad
 //
 
 import SwiftUI

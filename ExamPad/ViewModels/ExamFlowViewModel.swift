@@ -1,6 +1,6 @@
 //
 //  ExamFlowViewModel.swift
-//  DigitalExamNotebook
+//  ExamPad
 //
 
 import SwiftUI

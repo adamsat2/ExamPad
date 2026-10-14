@@ -1,6 +1,6 @@
 //
 //  ContentView.swift
-//  DigitalExamNotebook
+//  ExamPad
 //
 
 import SwiftUI

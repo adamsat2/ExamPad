@@ -1,6 +1,6 @@
 //
 //  ColorExtension.swift
-//  DigitalExamNotebook
+//  ExamPad
 //
 
 import SwiftUI

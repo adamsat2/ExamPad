@@ -1,6 +1,6 @@
 //
 //  ActiveExamView.swift
-//  DigitalExamNotebook
+//  ExamPad
 //
 
 import SwiftUI
