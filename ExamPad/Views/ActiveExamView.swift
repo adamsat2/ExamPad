@@ -157,3 +157,9 @@ struct ActiveExamView: View {
         )
     }
 }
+
+#Preview {
+    ActiveExamView()
+        .environmentObject(ExamFlowViewModel())
+        .environmentObject(AssessmentManager())
+}
