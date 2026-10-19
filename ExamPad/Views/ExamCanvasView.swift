@@ -9,8 +9,28 @@ import PencilKit
 struct ExamCanvasView: UIViewRepresentable {
     @Binding var canvasView: PKCanvasView
     @Binding var currentTool: PKTool
+    var onDrawingChanged: ((PKDrawing) -> Void)? = nil
+    
+    func makeCoordinator() -> Coordinator {
+        Coordinator(self)
+    }
+    
+    final class Coordinator: NSObject, PKCanvasViewDelegate {
+        var parent: ExamCanvasView
+        
+        init(_ parent: ExamCanvasView) {
+            self.parent = parent
+        }
+        
+        func canvasViewDrawingDidChange(_ canvasView: PKCanvasView) {
+            parent.onDrawingChanged?(canvasView.drawing)
+        }
+    }
     
     func makeUIView(context: Context) -> PKCanvasView {
+        canvasView.delegate = context.coordinator
+        // Only Apple Pencil is recognized for drawing tools (pencil, lasso, eraser)
+        // Finger touches are ignored by drawing recognizer so user can scroll naturally
         canvasView.drawingPolicy = .pencilOnly
         canvasView.backgroundColor = .clear
         canvasView.isOpaque = false
@@ -30,7 +50,9 @@ struct ExamCanvasView: UIViewRepresentable {
     }
     
     func updateUIView(_ uiView: PKCanvasView, context: Context) {
+        context.coordinator.parent = self
         uiView.tool = currentTool
+        uiView.drawingPolicy = .pencilOnly
     }
 }
 

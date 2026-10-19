@@ -6,9 +6,12 @@
 import SwiftUI
 
 struct MathGridView: View {
+    var step: CGFloat = 25.0
+    var lineWidth: CGFloat = 0.5
+    var lineColor: Color = .black
+    
     var body: some View {
         Canvas { context, size in
-            let step: CGFloat = 25.0
             var path = Path()
             
             // Vertical lines
@@ -23,8 +26,8 @@ struct MathGridView: View {
                 path.addLine(to: CGPoint(x: size.width, y: y))
             }
             
-            // Draw the grid lines in black
-            context.stroke(path, with: .color(.black), lineWidth: 0.5)
+            // Draw the grid lines
+            context.stroke(path, with: .color(lineColor), lineWidth: lineWidth)
         }
         // Expand to fill the allocated frame
         .frame(maxWidth: .infinity, maxHeight: .infinity)

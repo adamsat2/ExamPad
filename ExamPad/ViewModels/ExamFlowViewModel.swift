@@ -22,6 +22,8 @@ final class ExamFlowViewModel: ObservableObject {
     @Published var gridPageCount: Int = 1
     @Published var showSubmitConfirmation: Bool = false
     @Published var submissionSuccess: Bool = false
+    @Published var currentDrawing: PKDrawing = PKDrawing()
+    @Published var drawingRevision: Int = 0
     
     // PencilKit Tool State
     @Published var currentTool: PKTool = PKInkingTool(.pen, color: .black, width: 2.0)
@@ -63,7 +65,8 @@ final class ExamFlowViewModel: ObservableObject {
         assessmentManager.endExamLockdown()
         submissionSuccess = false
         gridPageCount = 1
+        currentDrawing = PKDrawing()
+        drawingRevision = 0
         currentState = .start
     }
 }
-
