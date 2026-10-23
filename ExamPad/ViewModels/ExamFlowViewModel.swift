@@ -26,7 +26,21 @@ final class ExamFlowViewModel: ObservableObject {
     @Published var drawingRevision: Int = 0
     
     // PencilKit Tool State
+    @Published var selectedPenColor: UIColor = .black
+    @Published var selectedPenWidth: CGFloat = 2.0
     @Published var currentTool: PKTool = PKInkingTool(.pen, color: .black, width: 2.0)
+    
+    var isPenActive: Bool {
+        currentTool is PKInkingTool
+    }
+    
+    var isEraserActive: Bool {
+        currentTool is PKEraserTool
+    }
+    
+    var isLassoActive: Bool {
+        currentTool is PKLassoTool
+    }
     
     // Simulates the QR scan bypass for current development stage
     // When QR is integrated, this will decode the payload and transition to .waitingForExam
@@ -39,13 +53,31 @@ final class ExamFlowViewModel: ObservableObject {
         gridPageCount += 1
     }
     
+    func selectPen(color: UIColor? = nil, width: CGFloat? = nil) {
+        if let color = color {
+            selectedPenColor = color
+        }
+        if let width = width {
+            selectedPenWidth = width
+        }
+        currentTool = PKInkingTool(.pen, color: selectedPenColor, width: selectedPenWidth)
+    }
+    
+    func selectEraser() {
+        currentTool = PKEraserTool(.bitmap)
+    }
+    
+    func selectLasso() {
+        currentTool = PKLassoTool()
+    }
+    
     func selectTool(color: UIColor?, isEraser: Bool = false, isLasso: Bool = false) {
         if isEraser {
-            currentTool = PKEraserTool(.bitmap)
+            selectEraser()
         } else if isLasso {
-            currentTool = PKLassoTool()
+            selectLasso()
         } else if let color = color {
-            currentTool = PKInkingTool(.pen, color: color, width: 2.0)
+            selectPen(color: color)
         }
     }
     
@@ -67,6 +99,9 @@ final class ExamFlowViewModel: ObservableObject {
         gridPageCount = 1
         currentDrawing = PKDrawing()
         drawingRevision = 0
+        selectedPenColor = .black
+        selectedPenWidth = 2.0
+        currentTool = PKInkingTool(.pen, color: .black, width: 2.0)
         currentState = .start
     }
 }

@@ -12,6 +12,7 @@ struct ActiveExamView: View {
     
     @State private var canvasView = PKCanvasView()
     @State private var isPageSidebarPresented: Bool = false
+    @State private var isPencilMenuPresented: Bool = false
     @State private var currentPageIndex: Int = 0
     
     private let pageSpacing: CGFloat = 24
@@ -20,26 +21,102 @@ struct ActiveExamView: View {
     var body: some View {
         VStack(spacing: 0) {
             // Persistent Top Menu
-            HStack(spacing: 20) {
-                Button(action: { viewModel.selectTool(color: .black) }) {
+            HStack(spacing: 24) {
+                // Single Pencil Tool with Color & Width Mini Menu
+                VStack(spacing: 4) {
                     Image(systemName: "pencil")
-                        .foregroundColor(viewModel.currentTool is PKInkingTool && (viewModel.currentTool as? PKInkingTool)?.color == .black ? .examButton : .primary)
+                        .font(.system(size: 22, weight: .semibold))
+                        .foregroundStyle(
+                            viewModel.isPenActive ?
+                            AnyShapeStyle(
+                                LinearGradient(
+                                    stops: [
+                                        .init(color: Color(red: 1.0, green: 0.82, blue: 0.1), location: 0.0),
+                                        .init(color: Color(red: 1.0, green: 0.82, blue: 0.1), location: 0.72),
+                                        .init(color: Color(red: 0.95, green: 0.45, blue: 0.55), location: 0.72),
+                                        .init(color: Color(red: 0.95, green: 0.45, blue: 0.55), location: 1.0)
+                                    ],
+                                    startPoint: .bottomLeading,
+                                    endPoint: .topTrailing
+                                )
+                            ) : AnyShapeStyle(Color.secondary)
+                        )
+                        .frame(height: 26)
+                    
+                    RoundedRectangle(cornerRadius: 1.5)
+                        .fill(viewModel.isPenActive ? Color.blue : Color.clear)
+                        .frame(width: 22, height: 3)
                 }
-                
-                Button(action: { viewModel.selectTool(color: .blue) }) {
-                    Image(systemName: "pencil")
-                        .foregroundColor(viewModel.currentTool is PKInkingTool && (viewModel.currentTool as? PKInkingTool)?.color == .blue ? .blue : .primary)
+                .frame(width: 40)
+                .contentShape(Rectangle())
+                .onTapGesture {
+                    if !viewModel.isPenActive {
+                        viewModel.selectPen()
+                    } else {
+                        isPencilMenuPresented.toggle()
+                    }
                 }
+                .onLongPressGesture(minimumDuration: 0.35) {
+                    if !viewModel.isPenActive {
+                        viewModel.selectPen()
+                    }
+                    isPencilMenuPresented = true
+                }
+                .popover(isPresented: $isPencilMenuPresented, arrowEdge: .top) {
+                    PencilSettingsMenuView(viewModel: viewModel)
+                        .presentationCompactAdaptation(.popover)
+                }
+                .accessibilityLabel("Pen Tool")
                 
-                Button(action: { viewModel.selectTool(color: nil, isLasso: true) }) {
+                // Eraser Tool
+                VStack(spacing: 4) {
+                    Image(systemName: "eraser.fill")
+                        .font(.system(size: 22, weight: .semibold))
+                        .foregroundStyle(
+                            viewModel.isEraserActive ?
+                            AnyShapeStyle(
+                                LinearGradient(
+                                    stops: [
+                                        .init(color: Color(red: 0.96, green: 0.50, blue: 0.62), location: 0.0),
+                                        .init(color: Color(red: 0.96, green: 0.50, blue: 0.62), location: 0.52),
+                                        .init(color: Color(red: 0.78, green: 0.28, blue: 0.42), location: 0.52),
+                                        .init(color: Color(red: 0.78, green: 0.28, blue: 0.42), location: 1.0)
+                                    ],
+                                    startPoint: .topTrailing,
+                                    endPoint: .bottomLeading
+                                )
+                            ) : AnyShapeStyle(Color.secondary)
+                        )
+                        .frame(height: 26)
+                    
+                    RoundedRectangle(cornerRadius: 1.5)
+                        .fill(viewModel.isEraserActive ? Color.blue : Color.clear)
+                        .frame(width: 22, height: 3)
+                }
+                .frame(width: 40)
+                .contentShape(Rectangle())
+                .onTapGesture {
+                    viewModel.selectEraser()
+                }
+                .accessibilityLabel("Eraser Tool")
+                
+                // Lasso Tool
+                VStack(spacing: 4) {
                     Image(systemName: "lasso")
-                        .foregroundColor(.primary)
+                        .font(.system(size: 22, weight: .semibold))
+                        .foregroundColor(viewModel.isLassoActive ? .blue : .secondary)
+                        .frame(height: 26)
+                    
+                    RoundedRectangle(cornerRadius: 1.5)
+                        .fill(viewModel.isLassoActive ? Color.blue : Color.clear)
+                        .frame(width: 22, height: 3)
                 }
-                
-                Button(action: { viewModel.selectTool(color: nil, isEraser: true) }) {
-                    Image(systemName: "eraser")
-                        .foregroundColor(.primary)
+                .frame(width: 40)
+                .contentShape(Rectangle())
+                .onTapGesture {
+                    viewModel.selectLasso()
                 }
+                .accessibilityLabel("Lasso Tool")
                 
                 Spacer()
                 
@@ -63,7 +140,9 @@ struct ActiveExamView: View {
                     .fontWeight(.bold)
                 }
             }
-            .padding()
+            .padding(.horizontal, 20)
+            .padding(.top, 12)
+            .padding(.bottom, 8)
             .background(Color(UIColor.systemGroupedBackground))
             .shadow(color: .black.opacity(0.1), radius: 3, y: 2)
             
@@ -126,8 +205,9 @@ struct ActiveExamView: View {
                                             )
                                     }
                                 }
+                                .padding(.vertical, 20)
                                 
-                                // Transparent drawing layer matching exact calculated height
+                                // PencilKit Canvas overlaid on the pages
                                 ExamCanvasView(
                                     canvasView: $canvasView,
                                     currentTool: $viewModel.currentTool,
@@ -136,107 +216,116 @@ struct ActiveExamView: View {
                                         viewModel.drawingRevision += 1
                                     }
                                 )
-                                .frame(width: pageWidth, height: totalDocumentHeight)
+                                .frame(width: pageWidth, height: totalDocumentHeight + 40)
+                                .allowsHitTesting(true)
                             }
-                            // Add padding to the ZStack so the first/last pages aren't flush against the screen edges
-                            .padding(.vertical, pageSpacing)
                         }
-                        .frame(width: fullGeo.size.width, height: fullGeo.size.height)
                         .coordinateSpace(name: "ExamDocumentScrollView")
-                        .onPreferenceChange(PageFramePreferenceKey.self) { framesDict in
-                            let frames = Array(framesDict.values)
-                            guard !frames.isEmpty else { return }
-                            let center = viewportHeight / 2
+                        .onPreferenceChange(PageFramePreferenceKey.self) { frames in
+                            let centerTarget = viewportHeight / 2.0
+                            var closestIndex = currentPageIndex
+                            var smallestDistance: CGFloat = .infinity
                             
-                            let activeIndex: Int
-                            if let containing = frames.first(where: { $0.minY <= center && $0.maxY >= center }) {
-                                activeIndex = containing.index
-                            } else if let closest = frames.min(by: { abs($0.midY - center) < abs($1.midY - center) }) {
-                                activeIndex = closest.index
-                            } else {
-                                activeIndex = 0
+                            for (index, data) in frames {
+                                let distance = abs(data.midY - centerTarget)
+                                if distance < smallestDistance {
+                                    smallestDistance = distance
+                                    closestIndex = index
+                                }
                             }
                             
-                            if currentPageIndex != activeIndex {
-                                currentPageIndex = activeIndex
+                            if closestIndex != currentPageIndex {
+                                currentPageIndex = closestIndex
                             }
                         }
-                        .background(Color(UIColor.secondarySystemBackground))
                         
-                        // Trailing Page Column (Overlay panel, Notability style)
+                        // Trailing slide-over sidebar column
                         if isPageSidebarPresented {
-                            HStack(spacing: 0) {
-                                Divider()
-                                
-                                ExamPageSidebarView(
-                                    pageCount: totalPages,
-                                    currentPageIndex: currentPageIndex,
-                                    drawing: viewModel.currentDrawing,
-                                    drawingVersion: viewModel.drawingRevision,
-                                    pageWidth: pageWidth,
-                                    pageHeight: pageHeight,
-                                    pageSpacing: pageSpacing,
-                                    onSelectPage: { selectedIndex in
-                                        currentPageIndex = selectedIndex
-                                        withAnimation(.easeInOut(duration: 0.3)) {
-                                            scrollProxy.scrollTo(selectedIndex, anchor: .top)
-                                        }
-                                    },
-                                    onToggleFormulaPage: {
-                                        // TODO: Implement formula overlay
-                                    },
-                                    onAddPage: {
-                                        viewModel.addGridPage()
-                                        let newPageIndex = viewModel.gridPageCount
-                                        currentPageIndex = newPageIndex
-                                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-                                            withAnimation(.easeInOut(duration: 0.3)) {
-                                                scrollProxy.scrollTo(newPageIndex, anchor: .top)
-                                            }
-                                        }
+                            ExamPageSidebarView(
+                                pageCount: totalPages,
+                                currentPageIndex: currentPageIndex,
+                                drawing: viewModel.currentDrawing,
+                                drawingVersion: viewModel.drawingRevision,
+                                pageWidth: pageWidth,
+                                pageHeight: pageHeight,
+                                pageSpacing: pageSpacing,
+                                onSelectPage: { selectedIndex in
+                                    withAnimation {
+                                        scrollProxy.scrollTo(selectedIndex, anchor: .top)
                                     }
-                                )
-                                .frame(width: sidebarWidth)
-                                .shadow(color: .black.opacity(0.18), radius: 8, x: -3, y: 0)
-                            }
-                            .transition(.move(edge: .trailing).combined(with: .opacity))
+                                },
+                                onToggleFormulaPage: {
+                                    // TODO: Implement formula overlay
+                                },
+                                onAddPage: {
+                                    viewModel.addGridPage()
+                                }
+                            )
+                            .frame(width: sidebarWidth)
+                            .transition(.move(edge: .trailing))
+                            .shadow(color: .black.opacity(0.18), radius: 8, x: -3, y: 0)
                         }
                     }
                 }
             }
         }
-        .navigationBarBackButtonHidden(true)
-        .onAppear {
-            assessmentManager.clearClipboard()
-            assessmentManager.beginExamLockdown()
-        }
-        .alert("Submit Exam", isPresented: $viewModel.showSubmitConfirmation) {
-            Button("Cancel", role: .cancel) { }
-            Button("Yes, Submit", role: .destructive) {
-                viewModel.submitExam(assessmentManager: assessmentManager)
-            }
-        } message: {
-            Text("Are you sure you want to submit your exam? You cannot undo this action.")
-        }
+        .edgesIgnoringSafeArea(.bottom)
         .overlay(
+            // Submission Confirmation Dialog
+            Group {
+                if viewModel.showSubmitConfirmation {
+                    Color.black.opacity(0.4)
+                        .edgesIgnoringSafeArea(.all)
+                    
+                    VStack(spacing: 20) {
+                        Text("Ready to submit?")
+                            .font(.headline)
+                        Text("You cannot edit your exam once submitted.")
+                            .font(.subheadline)
+                            .foregroundColor(.gray)
+                        
+                        HStack(spacing: 20) {
+                            Button("Cancel") {
+                                viewModel.showSubmitConfirmation = false
+                            }
+                            .foregroundColor(.secondary)
+                            
+                            Button("Confirm Submit") {
+                                viewModel.submitExam(assessmentManager: assessmentManager)
+                            }
+                            .foregroundColor(.red)
+                            .fontWeight(.bold)
+                        }
+                    }
+                    .padding(30)
+                    .background(Color(UIColor.systemBackground))
+                    .cornerRadius(16)
+                    .shadow(radius: 10)
+                }
+            }
+        )
+        .overlay(
+            // Submission Success View
             Group {
                 if viewModel.submissionSuccess {
+                    Color.black.opacity(0.5)
+                        .edgesIgnoringSafeArea(.all)
+                    
                     VStack(spacing: 16) {
                         Image(systemName: "checkmark.circle.fill")
-                            .resizable()
-                            .frame(width: 80, height: 80)
-                            .foregroundColor(.examButton)
+                            .font(.system(size: 64))
+                            .foregroundColor(.green)
                         
-                        Text("Exam Submitted Successfully")
+                        Text("Exam Submitted!")
                             .font(.title2)
-                            .fontWeight(.semibold)
-                            .foregroundColor(.examTitle)
+                            .fontWeight(.bold)
                         
-                        Button("OK") {
-                            viewModel.submissionSuccess = false
+                        Text("Returning to start screen...")
+                            .foregroundColor(.gray)
+                        
+                        Button("Done") {
                             viewModel.currentState = .start
                         }
-                        .padding(.top, 8)
                         .buttonStyle(.borderedProminent)
                         .tint(.examButton)
                     }
