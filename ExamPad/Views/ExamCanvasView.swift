@@ -6,42 +6,19 @@
 import SwiftUI
 import PencilKit
 
-/// Subclass of PKCanvasView that strictly locks internal scroll offsets and insets to zero.
-/// This prevents PencilKit's live rendering layer and Apple Pencil hover/inking tracking
-/// from shifting downwards when nested inside a scrolled container.
+/// Subclass of PKCanvasView that routes undo/redo actions to a shared document UndoManager.
 final class FixedCanvasView: PKCanvasView {
-    override var contentOffset: CGPoint {
-        get { .zero }
-        set { super.contentOffset = .zero }
-    }
+    weak var customUndoManager: UndoManager?
     
-    override var contentInset: UIEdgeInsets {
-        get { .zero }
-        set { super.contentInset = .zero }
-    }
-    
-    override func setContentOffset(_ contentOffset: CGPoint, animated: Bool) {
-        super.setContentOffset(.zero, animated: false)
-    }
-    
-    override func scrollRectToVisible(_ rect: CGRect, animated: Bool) {
-        // Prevent internal scrolling when touches or hover occurs
-    }
-    
-    override func layoutSubviews() {
-        super.layoutSubviews()
-        if super.contentOffset != .zero {
-            super.contentOffset = .zero
-        }
-        if contentSize != bounds.size && bounds.size != .zero {
-            contentSize = bounds.size
-        }
+    override var undoManager: UndoManager? {
+        return customUndoManager ?? super.undoManager
     }
 }
 
 struct ExamCanvasView: UIViewRepresentable {
     @Binding var drawing: PKDrawing
     @Binding var currentTool: PKTool
+    var undoManager: UndoManager? = nil
     var onDrawingChanged: (() -> Void)? = nil
     
     func makeCoordinator() -> Coordinator {
@@ -52,6 +29,7 @@ struct ExamCanvasView: UIViewRepresentable {
         var parent: ExamCanvasView
         var isUsingTool = false
         var isUpdatingFromSwiftUI = false
+        var lastCanvasDrawing: PKDrawing?
         
         init(_ parent: ExamCanvasView) {
             self.parent = parent
@@ -63,20 +41,38 @@ struct ExamCanvasView: UIViewRepresentable {
         
         func canvasViewDidEndUsingTool(_ canvasView: PKCanvasView) {
             isUsingTool = false
-            DispatchQueue.main.async {
-                self.parent.drawing = canvasView.drawing
+            commitDrawing(canvasView)
+        }
+        
+        func canvasViewDrawingDidChange(_ canvasView: PKCanvasView) {
+            // Guard against recursive events triggered by makeUIView / updateUIView
+            guard !isUpdatingFromSwiftUI else { return }
+            // If the user is drawing, we commit when the stroke ends (pen lifts)
+            if !isUsingTool {
+                commitDrawing(canvasView)
+            }
+        }
+        
+        private func commitDrawing(_ canvasView: PKCanvasView) {
+            let newDrawing = canvasView.drawing
+            lastCanvasDrawing = newDrawing
+            
+            // Asynchronously dispatch binding update so SwiftUI view hierarchy is never mutated
+            // mid-event or mid-layout pass
+            DispatchQueue.main.async { [weak self] in
+                guard let self = self else { return }
+                if !self.areDrawingsEqual(self.parent.drawing, newDrawing) {
+                    self.parent.drawing = newDrawing
+                }
                 self.parent.onDrawingChanged?()
             }
         }
         
-        func canvasViewDrawingDidChange(_ canvasView: PKCanvasView) {
-            guard !isUpdatingFromSwiftUI else { return }
-            if !isUsingTool {
-                DispatchQueue.main.async {
-                    self.parent.drawing = canvasView.drawing
-                    self.parent.onDrawingChanged?()
-                }
+        func areDrawingsEqual(_ a: PKDrawing, _ b: PKDrawing) -> Bool {
+            if a.strokes.isEmpty && b.strokes.isEmpty {
+                return true
             }
+            return a == b
         }
         
         func isSameTool(_ toolA: PKTool, _ toolB: PKTool) -> Bool {
@@ -97,6 +93,12 @@ struct ExamCanvasView: UIViewRepresentable {
     
     func makeUIView(context: Context) -> PKCanvasView {
         let canvasView = FixedCanvasView()
+        canvasView.customUndoManager = undoManager
+        
+        // Populate drawing before attaching delegate to avoid spurious change events during construction
+        canvasView.drawing = drawing
+        context.coordinator.lastCanvasDrawing = drawing
+        
         canvasView.delegate = context.coordinator
         // Only Apple Pencil is recognized for drawing tools (pencil, lasso, eraser)
         // Finger touches are ignored by drawing recognizer so user can scroll naturally
@@ -105,15 +107,12 @@ struct ExamCanvasView: UIViewRepresentable {
         canvasView.isOpaque = false
         canvasView.isScrollEnabled = false
         
-        // Disable automatic content insets to prevent shifts relative to safe area
+        // Disable automatic content insets
         canvasView.contentInsetAdjustmentBehavior = .never
-        canvasView.contentInset = .zero
         canvasView.bounces = false
         
         // Forces black ink to stay black even if the device is in dark mode
         canvasView.overrideUserInterfaceStyle = .light
-        
-        canvasView.drawing = drawing
         canvasView.tool = currentTool
         return canvasView
     }
@@ -121,10 +120,29 @@ struct ExamCanvasView: UIViewRepresentable {
     func updateUIView(_ uiView: PKCanvasView, context: Context) {
         context.coordinator.parent = self
         
-        if uiView.drawing != drawing && !context.coordinator.isUsingTool {
-            context.coordinator.isUpdatingFromSwiftUI = true
-            uiView.drawing = drawing
-            context.coordinator.isUpdatingFromSwiftUI = false
+        if let fixedCanvas = uiView as? FixedCanvasView {
+            fixedCanvas.customUndoManager = undoManager
+        }
+        
+        // Only reload uiView.drawing if an external action modified `drawing` (e.g. Undo, Redo, or reset exam).
+        // NEVER reload uiView.drawing if the difference is due to the canvas having drawn new content
+        // that SwiftUI's async update hasn't settled yet.
+        if !context.coordinator.isUsingTool {
+            if let last = context.coordinator.lastCanvasDrawing {
+                // If `drawing` is genuinely different from what the canvas produced and what's on the canvas:
+                if !context.coordinator.areDrawingsEqual(drawing, last) &&
+                   !context.coordinator.areDrawingsEqual(uiView.drawing, drawing) {
+                    context.coordinator.isUpdatingFromSwiftUI = true
+                    uiView.drawing = drawing
+                    context.coordinator.lastCanvasDrawing = drawing
+                    context.coordinator.isUpdatingFromSwiftUI = false
+                }
+            } else if !context.coordinator.areDrawingsEqual(uiView.drawing, drawing) {
+                context.coordinator.isUpdatingFromSwiftUI = true
+                uiView.drawing = drawing
+                context.coordinator.lastCanvasDrawing = drawing
+                context.coordinator.isUpdatingFromSwiftUI = false
+            }
         }
         
         // Only update tool if changed to prevent resetting active tool state mid-stroke
@@ -133,9 +151,6 @@ struct ExamCanvasView: UIViewRepresentable {
         }
         if uiView.drawingPolicy != .pencilOnly {
             uiView.drawingPolicy = .pencilOnly
-        }
-        if uiView.contentSize != uiView.bounds.size && uiView.bounds.size != .zero {
-            uiView.contentSize = uiView.bounds.size
         }
     }
 }

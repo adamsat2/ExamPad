@@ -38,7 +38,7 @@ struct ActiveExamView: View {
                                     startPoint: .bottomLeading,
                                     endPoint: .topTrailing
                                 )
-                            ) : AnyShapeStyle(Color.secondary)
+                            ) : AnyShapeStyle(Color.primary)
                         )
                         .frame(height: 26)
                     
@@ -76,15 +76,15 @@ struct ActiveExamView: View {
                             AnyShapeStyle(
                                 LinearGradient(
                                     stops: [
-                                        .init(color: Color(red: 0.96, green: 0.50, blue: 0.62), location: 0.0),
+                                        .init(color: Color(red: 0.92, green: 0.93, blue: 0.96), location: 0.0),
+                                        .init(color: Color(red: 0.92, green: 0.93, blue: 0.96), location: 0.52),
                                         .init(color: Color(red: 0.96, green: 0.50, blue: 0.62), location: 0.52),
-                                        .init(color: Color(red: 0.78, green: 0.28, blue: 0.42), location: 0.52),
-                                        .init(color: Color(red: 0.78, green: 0.28, blue: 0.42), location: 1.0)
+                                        .init(color: Color(red: 0.96, green: 0.50, blue: 0.62), location: 1.0)
                                     ],
                                     startPoint: .topTrailing,
                                     endPoint: .bottomLeading
                                 )
-                            ) : AnyShapeStyle(Color.secondary)
+                            ) : AnyShapeStyle(Color.primary)
                         )
                         .frame(height: 26)
                     
@@ -103,7 +103,7 @@ struct ActiveExamView: View {
                 VStack(spacing: 4) {
                     Image(systemName: "lasso")
                         .font(.system(size: 22, weight: .semibold))
-                        .foregroundColor(viewModel.isLassoActive ? .blue : .secondary)
+                        .foregroundColor(viewModel.isLassoActive ? .blue : .primary)
                         .frame(height: 26)
                     
                     RoundedRectangle(cornerRadius: 1.5)
@@ -117,27 +117,59 @@ struct ActiveExamView: View {
                 }
                 .accessibilityLabel("Lasso Tool")
                 
+                // Undo Button
+                Button(action: {
+                    guard viewModel.canUndo else { return }
+                    viewModel.undo()
+                }) {
+                    VStack(spacing: 4) {
+                        Image(systemName: "arrow.uturn.backward")
+                            .font(.system(size: 20, weight: .semibold))
+                            .foregroundColor(viewModel.canUndo ? .primary : Color(UIColor.systemGray))
+                            .frame(height: 26)
+                        
+                        Color.clear
+                            .frame(width: 22, height: 3)
+                    }
+                    .frame(width: 40)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Undo")
+                
+                // Redo Button
+                Button(action: {
+                    guard viewModel.canRedo else { return }
+                    viewModel.redo()
+                }) {
+                    VStack(spacing: 4) {
+                        Image(systemName: "arrow.uturn.forward")
+                            .font(.system(size: 20, weight: .semibold))
+                            .foregroundColor(viewModel.canRedo ? .primary : Color(UIColor.systemGray))
+                            .frame(height: 26)
+                        
+                        Color.clear
+                            .frame(width: 22, height: 3)
+                    }
+                    .frame(width: 40)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Redo")
+                
                 Spacer()
                 
-                HStack(spacing: 20) {
-                    // Page Column Toggle Icon (2 cards side by side like Notability)
-                    Button(action: {
-                        withAnimation(.easeInOut(duration: 0.25)) {
-                            isPageSidebarPresented.toggle()
-                        }
-                    }) {
-                        Image(systemName: isPageSidebarPresented ? "rectangle.grid.1x2.fill" : "rectangle.grid.1x2")
-                            .font(.system(size: 20, weight: .medium))
-                            .foregroundColor(isPageSidebarPresented ? .examButton : .primary)
+                // Page Column Toggle Icon (2 cards side by side like Notability) on the trailing side
+                Button(action: {
+                    withAnimation(.easeInOut(duration: 0.25)) {
+                        isPageSidebarPresented.toggle()
                     }
-                    .accessibilityLabel("Page Manager")
-                    
-                    Button("Submit") {
-                        viewModel.showSubmitConfirmation = true
-                    }
-                    .foregroundColor(.red)
-                    .fontWeight(.bold)
+                }) {
+                    Image(systemName: isPageSidebarPresented ? "rectangle.grid.1x2.fill" : "rectangle.grid.1x2")
+                        .font(.system(size: 20, weight: .medium))
+                        .foregroundColor(isPageSidebarPresented ? .examButton : .primary)
                 }
+                .accessibilityLabel("Page Manager")
             }
             .padding(.horizontal, 20)
             .padding(.top, 12)
@@ -166,7 +198,11 @@ struct ActiveExamView: View {
                                             get: { viewModel.drawing(for: 0) },
                                             set: { viewModel.setDrawing($0, for: 0) }
                                         ),
-                                        currentTool: $viewModel.currentTool
+                                        currentTool: $viewModel.currentTool,
+                                        undoManager: viewModel.undoManager,
+                                        onDrawingChanged: {
+                                            viewModel.updateUndoRedoState()
+                                        }
                                     )
                                 }
                                 .frame(width: pageWidth, height: pageHeight)
@@ -199,7 +235,11 @@ struct ActiveExamView: View {
                                                 get: { viewModel.drawing(for: pageIdx) },
                                                 set: { viewModel.setDrawing($0, for: pageIdx) }
                                             ),
-                                            currentTool: $viewModel.currentTool
+                                            currentTool: $viewModel.currentTool,
+                                            undoManager: viewModel.undoManager,
+                                            onDrawingChanged: {
+                                                viewModel.updateUndoRedoState()
+                                            }
                                         )
                                     }
                                     .frame(width: pageWidth, height: pageHeight)
@@ -256,6 +296,9 @@ struct ActiveExamView: View {
                                     withAnimation {
                                         scrollProxy.scrollTo(selectedIndex, anchor: .top)
                                     }
+                                },
+                                onSubmit: {
+                                    viewModel.showSubmitConfirmation = true
                                 },
                                 onToggleFormulaPage: {
                                     // TODO: Implement formula overlay

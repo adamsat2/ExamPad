@@ -14,14 +14,36 @@ struct ExamPageSidebarView: View {
     var pageWidth: CGFloat = 800
     var pageHeight: CGFloat = 1131
     let onSelectPage: (Int) -> Void
+    var onSubmit: () -> Void = {}
     let onToggleFormulaPage: () -> Void
     let onAddPage: () -> Void
     
     var body: some View {
         VStack(spacing: 0) {
             // Action Buttons at the top of the column
-            VStack(spacing: 10) {
-                Button(action: onToggleFormulaPage) {
+            VStack(spacing: 8) {
+                // Submit Button (Red-tinted, matching Add Page shape & size)
+                Button(action: {
+                    onSubmit()
+                }) {
+                    HStack(spacing: 6) {
+                        Image(systemName: "checkmark.circle")
+                        Text("Submit Exam")
+                            .font(.subheadline)
+                            .fontWeight(.medium)
+                            .lineLimit(1)
+                    }
+                    .frame(maxWidth: .infinity, minHeight: 36)
+                    .padding(.horizontal, 10)
+                    .background(Color.red.opacity(0.15))
+                    .foregroundColor(.red)
+                    .cornerRadius(8)
+                }
+                
+                // Toggle Formula Page Button
+                Button(action: {
+                    onToggleFormulaPage()
+                }) {
                     HStack(spacing: 6) {
                         Image(systemName: "function")
                         Text("Toggle Formula Page")
@@ -30,23 +52,25 @@ struct ExamPageSidebarView: View {
                             .lineLimit(1)
                             .minimumScaleFactor(0.85)
                     }
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 9)
+                    .frame(maxWidth: .infinity, minHeight: 36)
                     .padding(.horizontal, 10)
                     .background(Color(UIColor.tertiarySystemFill))
                     .foregroundColor(.primary)
                     .cornerRadius(8)
                 }
                 
-                Button(action: onAddPage) {
+                // Add Page Button (Green-tinted)
+                Button(action: {
+                    onAddPage()
+                }) {
                     HStack(spacing: 6) {
                         Image(systemName: "plus")
                         Text("Add Page")
                             .font(.subheadline)
                             .fontWeight(.medium)
+                            .lineLimit(1)
                     }
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 9)
+                    .frame(maxWidth: .infinity, minHeight: 36)
                     .padding(.horizontal, 10)
                     .background(Color.examButton.opacity(0.15))
                     .foregroundColor(.examButton)
@@ -70,8 +94,6 @@ struct ExamPageSidebarView: View {
                             drawingVersion: drawingVersion,
                             pageWidth: pageWidth,
                             pageHeight: pageHeight,
-                            thumbnailWidth: 140,
-                            thumbnailHeight: 198,
                             onSelect: {
                                 onSelectPage(index)
                             }
@@ -93,6 +115,7 @@ struct ExamPageSidebarView: View {
         currentPageIndex: 1,
         getDrawing: { _ in PKDrawing() },
         onSelectPage: { _ in },
+        onSubmit: {},
         onToggleFormulaPage: {},
         onAddPage: {}
     )
