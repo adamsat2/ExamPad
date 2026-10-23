@@ -9,11 +9,10 @@ import PencilKit
 struct ExamPageSidebarView: View {
     let pageCount: Int
     let currentPageIndex: Int
-    var drawing: PKDrawing = PKDrawing()
+    var getDrawing: (Int) -> PKDrawing = { _ in PKDrawing() }
     var drawingVersion: Int = 0
     var pageWidth: CGFloat = 800
     var pageHeight: CGFloat = 1131
-    var pageSpacing: CGFloat = 24
     let onSelectPage: (Int) -> Void
     let onToggleFormulaPage: () -> Void
     let onAddPage: () -> Void
@@ -67,11 +66,10 @@ struct ExamPageSidebarView: View {
                         ExamPageThumbnailView(
                             pageIndex: index,
                             isCurrentPage: index == currentPageIndex,
-                            drawing: drawing,
+                            drawing: getDrawing(index),
                             drawingVersion: drawingVersion,
                             pageWidth: pageWidth,
                             pageHeight: pageHeight,
-                            pageSpacing: pageSpacing,
                             thumbnailWidth: 140,
                             thumbnailHeight: 198,
                             onSelect: {
@@ -93,6 +91,7 @@ struct ExamPageSidebarView: View {
     ExamPageSidebarView(
         pageCount: 3,
         currentPageIndex: 1,
+        getDrawing: { _ in PKDrawing() },
         onSelectPage: { _ in },
         onToggleFormulaPage: {},
         onAddPage: {}

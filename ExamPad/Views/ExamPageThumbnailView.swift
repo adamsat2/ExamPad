@@ -13,15 +13,13 @@ struct ExamPageThumbnailView: View {
     var drawingVersion: Int = 0
     var pageWidth: CGFloat = 800
     var pageHeight: CGFloat = 1131
-    var pageSpacing: CGFloat = 24
     var thumbnailWidth: CGFloat = 140
     var thumbnailHeight: CGFloat = 198
     let onSelect: () -> Void
     
     private var pageDrawingImage: UIImage? {
         guard !drawing.strokes.isEmpty else { return nil }
-        let pageY = CGFloat(pageIndex) * (pageHeight + pageSpacing)
-        let pageRect = CGRect(x: 0, y: pageY, width: max(pageWidth, 1), height: max(pageHeight, 1))
+        let pageRect = CGRect(x: 0, y: 0, width: max(pageWidth, 1), height: max(pageHeight, 1))
         
         // Force light mode trait collection so black ink is rendered black (not inverted to white)
         // Use scale: 1.0 for high resolution, crisp, razor-sharp pen rendering

@@ -22,7 +22,7 @@ final class ExamFlowViewModel: ObservableObject {
     @Published var gridPageCount: Int = 1
     @Published var showSubmitConfirmation: Bool = false
     @Published var submissionSuccess: Bool = false
-    @Published var currentDrawing: PKDrawing = PKDrawing()
+    @Published var pageDrawings: [Int: PKDrawing] = [:]
     @Published var drawingRevision: Int = 0
     
     // PencilKit Tool State
@@ -51,6 +51,15 @@ final class ExamFlowViewModel: ObservableObject {
     
     func addGridPage() {
         gridPageCount += 1
+    }
+    
+    func drawing(for pageIndex: Int) -> PKDrawing {
+        pageDrawings[pageIndex] ?? PKDrawing()
+    }
+    
+    func setDrawing(_ drawing: PKDrawing, for pageIndex: Int) {
+        pageDrawings[pageIndex] = drawing
+        drawingRevision += 1
     }
     
     func selectPen(color: UIColor? = nil, width: CGFloat? = nil) {
@@ -97,7 +106,7 @@ final class ExamFlowViewModel: ObservableObject {
         assessmentManager.endExamLockdown()
         submissionSuccess = false
         gridPageCount = 1
-        currentDrawing = PKDrawing()
+        pageDrawings.removeAll()
         drawingRevision = 0
         selectedPenColor = .black
         selectedPenWidth = 2.0

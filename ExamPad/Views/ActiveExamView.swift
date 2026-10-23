@@ -10,7 +10,6 @@ struct ActiveExamView: View {
     @EnvironmentObject var viewModel: ExamFlowViewModel
     @EnvironmentObject var assessmentManager: AssessmentManager
     
-    @State private var canvasView = PKCanvasView()
     @State private var isPageSidebarPresented: Bool = false
     @State private var isPencilMenuPresented: Bool = false
     @State private var currentPageIndex: Int = 0
@@ -154,71 +153,76 @@ struct ActiveExamView: View {
                     let pageHeight = pageWidth * 1.414
                     let viewportHeight = fullGeo.size.height
                     let totalPages = 1 + viewModel.gridPageCount
-                    let totalDocumentHeight = (CGFloat(totalPages) * pageHeight) + (CGFloat(totalPages - 1) * pageSpacing)
                     
                     ZStack(alignment: .trailing) {
                         ScrollView {
-                            ZStack(alignment: .top) {
-                                VStack(spacing: pageSpacing) {
-                                    // Page 0: Questionnaire Page
+                            VStack(spacing: pageSpacing) {
+                                // Page 0: Questionnaire Page with its dedicated canvas
+                                ZStack {
                                     QuestionnairePageView()
-                                        .frame(width: pageWidth, height: pageHeight)
-                                        .shadow(color: .black.opacity(0.15), radius: 8, x: 0, y: 4)
-                                        .id(0)
-                                        .background(
-                                            GeometryReader { pageGeo in
-                                                let frame = pageGeo.frame(in: .named("ExamDocumentScrollView"))
-                                                Color.clear.preference(
-                                                    key: PageFramePreferenceKey.self,
-                                                    value: [
-                                                        0: PageFrameData(
-                                                            index: 0,
-                                                            minY: frame.minY,
-                                                            maxY: frame.maxY
-                                                        )
-                                                    ]
-                                                )
-                                            }
-                                        )
                                     
-                                    // Math Grid Pages (Page 1+)
-                                    ForEach(0..<viewModel.gridPageCount, id: \.self) { gridIndex in
-                                        let pageIdx = gridIndex + 1
-                                        MathGridView()
-                                            .frame(width: pageWidth, height: pageHeight)
-                                            .shadow(color: .black.opacity(0.15), radius: 8, x: 0, y: 4)
-                                            .id(pageIdx)
-                                            .background(
-                                                GeometryReader { pageGeo in
-                                                    let frame = pageGeo.frame(in: .named("ExamDocumentScrollView"))
-                                                    Color.clear.preference(
-                                                        key: PageFramePreferenceKey.self,
-                                                        value: [
-                                                            pageIdx: PageFrameData(
-                                                                index: pageIdx,
-                                                                minY: frame.minY,
-                                                                maxY: frame.maxY
-                                                            )
-                                                        ]
-                                                    )
-                                                }
-                                            )
-                                    }
+                                    ExamCanvasView(
+                                        drawing: Binding(
+                                            get: { viewModel.drawing(for: 0) },
+                                            set: { viewModel.setDrawing($0, for: 0) }
+                                        ),
+                                        currentTool: $viewModel.currentTool
+                                    )
                                 }
-                                .padding(.vertical, 20)
-                                
-                                // PencilKit Canvas overlaid on the pages
-                                ExamCanvasView(
-                                    canvasView: $canvasView,
-                                    currentTool: $viewModel.currentTool,
-                                    onDrawingChanged: { drawing in
-                                        viewModel.currentDrawing = drawing
-                                        viewModel.drawingRevision += 1
+                                .frame(width: pageWidth, height: pageHeight)
+                                .shadow(color: .black.opacity(0.15), radius: 8, x: 0, y: 4)
+                                .id(0)
+                                .background(
+                                    GeometryReader { pageGeo in
+                                        let frame = pageGeo.frame(in: .named("ExamDocumentScrollView"))
+                                        Color.clear.preference(
+                                            key: PageFramePreferenceKey.self,
+                                            value: [
+                                                0: PageFrameData(
+                                                    index: 0,
+                                                    minY: frame.minY,
+                                                    maxY: frame.maxY
+                                                )
+                                            ]
+                                        )
                                     }
                                 )
-                                .frame(width: pageWidth, height: totalDocumentHeight + 40)
-                                .allowsHitTesting(true)
+                                
+                                // Math Grid Pages (Page 1+) with dedicated per-page canvases
+                                ForEach(0..<viewModel.gridPageCount, id: \.self) { gridIndex in
+                                    let pageIdx = gridIndex + 1
+                                    ZStack {
+                                        MathGridView()
+                                        
+                                        ExamCanvasView(
+                                            drawing: Binding(
+                                                get: { viewModel.drawing(for: pageIdx) },
+                                                set: { viewModel.setDrawing($0, for: pageIdx) }
+                                            ),
+                                            currentTool: $viewModel.currentTool
+                                        )
+                                    }
+                                    .frame(width: pageWidth, height: pageHeight)
+                                    .shadow(color: .black.opacity(0.15), radius: 8, x: 0, y: 4)
+                                    .id(pageIdx)
+                                    .background(
+                                        GeometryReader { pageGeo in
+                                            let frame = pageGeo.frame(in: .named("ExamDocumentScrollView"))
+                                            Color.clear.preference(
+                                                key: PageFramePreferenceKey.self,
+                                                value: [
+                                                    pageIdx: PageFrameData(
+                                                        index: pageIdx,
+                                                        minY: frame.minY,
+                                                        maxY: frame.maxY
+                                                    )
+                                                ]
+                                            )
+                                        }
+                                    )
+                                }
                             }
+                            .padding(.vertical, 20)
                         }
                         .coordinateSpace(name: "ExamDocumentScrollView")
                         .onPreferenceChange(PageFramePreferenceKey.self) { frames in
@@ -244,11 +248,10 @@ struct ActiveExamView: View {
                             ExamPageSidebarView(
                                 pageCount: totalPages,
                                 currentPageIndex: currentPageIndex,
-                                drawing: viewModel.currentDrawing,
+                                getDrawing: { viewModel.drawing(for: $0) },
                                 drawingVersion: viewModel.drawingRevision,
                                 pageWidth: pageWidth,
                                 pageHeight: pageHeight,
-                                pageSpacing: pageSpacing,
                                 onSelectPage: { selectedIndex in
                                     withAnimation {
                                         scrollProxy.scrollTo(selectedIndex, anchor: .top)
@@ -329,36 +332,13 @@ struct ActiveExamView: View {
                         .buttonStyle(.borderedProminent)
                         .tint(.examButton)
                     }
-                    .padding(40)
+                    .padding(30)
                     .background(Color(UIColor.systemBackground))
                     .cornerRadius(16)
                     .shadow(radius: 10)
                 }
             }
         )
-    }
-}
-
-struct QuestionnairePageView: View {
-    var body: some View {
-        ZStack {
-            Color.white
-            
-            VStack(spacing: 12) {
-                Image(systemName: "doc.text.viewfinder")
-                    .font(.system(size: 48))
-                    .foregroundColor(.examTitle)
-                
-                Text("Exam Questionnaire")
-                    .font(.title2)
-                    .fontWeight(.bold)
-                    .foregroundColor(.black)
-                
-                Text("The supervisor's PDF will render on this page.")
-                    .font(.subheadline)
-                    .foregroundColor(.gray)
-            }
-        }
     }
 }
 
