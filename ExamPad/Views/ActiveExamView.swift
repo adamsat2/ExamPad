@@ -13,6 +13,9 @@ struct ActiveExamView: View {
     @State private var isPageSidebarPresented: Bool = false
     @State private var isPencilMenuPresented: Bool = false
     @State private var isEraserMenuPresented: Bool = false
+    @State private var isLassoMenuPresented: Bool = false
+    @State private var isUndoAnimating: Bool = false
+    @State private var isRedoAnimating: Bool = false
     @State private var currentPageIndex: Int = 0
     
     private let pageSpacing: CGFloat = 36
@@ -21,176 +24,226 @@ struct ActiveExamView: View {
     
     var body: some View {
         VStack(spacing: 0) {
-            // Persistent Top Menu
-            HStack(spacing: 24) {
-                // Single Pencil Tool with Color & Width Mini Menu
-                VStack(spacing: 4) {
-                    Image(systemName: "pencil")
-                        .font(.system(size: 22, weight: .semibold))
-                        .foregroundStyle(
-                            viewModel.isPenActive ?
-                            AnyShapeStyle(
-                                LinearGradient(
-                                    stops: [
-                                        .init(color: Color(red: 1.0, green: 0.82, blue: 0.1), location: 0.0),
-                                        .init(color: Color(red: 1.0, green: 0.82, blue: 0.1), location: 0.72),
-                                        .init(color: Color(red: 0.95, green: 0.45, blue: 0.55), location: 0.72),
-                                        .init(color: Color(red: 0.95, green: 0.45, blue: 0.55), location: 1.0)
-                                    ],
-                                    startPoint: .bottomLeading,
-                                    endPoint: .topTrailing
-                                )
-                            ) : AnyShapeStyle(Color.primary)
+            // Persistent Top Menu (with larger Exam Details header + extra spacing above tools)
+            VStack(spacing: 14) {
+                // Top Row: Exam Details & Live Lockdown Status Badge
+                HStack(alignment: .center, spacing: 12) {
+                    Text(viewModel.examTitle)
+                        .font(.system(size: 21, weight: .bold))
+                        .foregroundColor(.primary)
+                    
+                    Spacer()
+                    
+                    // Live Lockdown Status Pill (verifies lockdown state & tamper count on device)
+                    HStack(spacing: 6) {
+                        Image(systemName: assessmentManager.isExamLocked ? "lock.shield.fill" : "lock.open.fill")
+                            .font(.system(size: 13, weight: .semibold))
+                            .foregroundColor(
+                                assessmentManager.tamperViolationCount > 0
+                                ? .orange
+                                : (assessmentManager.isExamLocked ? .green : .secondary)
+                            )
+                        
+                        Text(
+                            assessmentManager.tamperViolationCount > 0
+                            ? "Lockdown Active (\(assessmentManager.tamperViolationCount) exit\(assessmentManager.tamperViolationCount == 1 ? "" : "s") logged)"
+                            : (assessmentManager.isExamLocked ? "Exam Lockdown Active" : "Unlocked")
                         )
-                        .frame(height: 26)
-                    
-                    RoundedRectangle(cornerRadius: 1.5)
-                        .fill(viewModel.isPenActive ? Color.blue : Color.clear)
-                        .frame(width: 22, height: 3)
-                }
-                .frame(width: 40)
-                .contentShape(Rectangle())
-                .onTapGesture {
-                    if !viewModel.isPenActive {
-                        viewModel.selectPen()
-                    } else {
-                        isPencilMenuPresented.toggle()
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundColor(.secondary)
                     }
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 5)
+                    .background(Color(UIColor.secondarySystemGroupedBackground))
+                    .clipShape(Capsule())
+                    .overlay(
+                        Capsule()
+                            .stroke(Color.primary.opacity(0.1), lineWidth: 1)
+                    )
                 }
-                .onLongPressGesture(minimumDuration: 0.35) {
-                    if !viewModel.isPenActive {
-                        viewModel.selectPen()
-                    }
-                    isPencilMenuPresented = true
-                }
-                .popover(isPresented: $isPencilMenuPresented, arrowEdge: .top) {
-                    PencilSettingsMenuView(viewModel: viewModel)
-                        .presentationCompactAdaptation(.popover)
-                }
-                .accessibilityLabel("Pen Tool")
                 
-                // Eraser Tool with Width & Mode Mini Menu
-                // Active state uses a clean Staedtler Mars Plastic style (cobalt blue sleeve + crisp white tip)
-                VStack(spacing: 4) {
-                    Image(systemName: "eraser.fill")
-                        .font(.system(size: 22, weight: .semibold))
-                        .foregroundStyle(
-                            viewModel.isEraserActive ?
-                            AnyShapeStyle(
-                                LinearGradient(
-                                    stops: [
-                                        .init(color: Color(red: 0.18, green: 0.50, blue: 0.92), location: 0.0),
-                                        .init(color: Color(red: 0.18, green: 0.50, blue: 0.92), location: 0.54),
-                                        .init(color: Color(red: 0.90, green: 0.94, blue: 0.99), location: 0.54),
-                                        .init(color: Color(red: 0.90, green: 0.94, blue: 0.99), location: 1.0)
-                                    ],
-                                    startPoint: .topTrailing,
-                                    endPoint: .bottomLeading
-                                )
-                            ) : AnyShapeStyle(Color.primary)
-                        )
-                        .frame(height: 26)
-                    
-                    RoundedRectangle(cornerRadius: 1.5)
-                        .fill(viewModel.isEraserActive ? Color.blue : Color.clear)
-                        .frame(width: 22, height: 3)
-                }
-                .frame(width: 40)
-                .contentShape(Rectangle())
-                .onTapGesture {
-                    if !viewModel.isEraserActive {
-                        viewModel.selectEraser()
-                    } else {
-                        isEraserMenuPresented.toggle()
-                    }
-                }
-                .onLongPressGesture(minimumDuration: 0.35) {
-                    if !viewModel.isEraserActive {
-                        viewModel.selectEraser()
-                    }
-                    isEraserMenuPresented = true
-                }
-                .popover(isPresented: $isEraserMenuPresented, arrowEdge: .top) {
-                    EraserSettingsMenuView(viewModel: viewModel)
-                        .presentationCompactAdaptation(.popover)
-                }
-                .accessibilityLabel("Eraser Tool")
-                
-                // Lasso Tool
-                VStack(spacing: 4) {
-                    Image(systemName: "lasso")
-                        .font(.system(size: 22, weight: .semibold))
-                        .foregroundColor(viewModel.isLassoActive ? .blue : .primary)
-                        .frame(height: 26)
-                    
-                    RoundedRectangle(cornerRadius: 1.5)
-                        .fill(viewModel.isLassoActive ? Color.blue : Color.clear)
-                        .frame(width: 22, height: 3)
-                }
-                .frame(width: 40)
-                .contentShape(Rectangle())
-                .onTapGesture {
-                    viewModel.selectLasso()
-                }
-                .accessibilityLabel("Lasso Tool")
-                
-                // Undo Button
-                Button(action: {
-                    guard viewModel.canUndo else { return }
-                    viewModel.undo()
-                }) {
+                // Bottom Row: Drawing Tools, Undo/Redo, and Side Menu Toggle
+                HStack(spacing: 24) {
+                    // Single Pencil Tool with Color & Width Mini Menu
                     VStack(spacing: 4) {
-                        Image(systemName: "arrow.uturn.backward")
-                            .font(.system(size: 20, weight: .semibold))
-                            .foregroundColor(viewModel.canUndo ? .primary : Color(UIColor.systemGray))
+                        Image(systemName: "pencil")
+                            .font(.system(size: 22, weight: .semibold))
+                            .foregroundColor(viewModel.isPenActive ? .blue : .primary)
                             .frame(height: 26)
                         
-                        Color.clear
+                        RoundedRectangle(cornerRadius: 1.5)
+                            .fill(viewModel.isPenActive ? Color.blue : Color.clear)
                             .frame(width: 22, height: 3)
                     }
                     .frame(width: 40)
                     .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel("Undo")
-                
-                // Redo Button
-                Button(action: {
-                    guard viewModel.canRedo else { return }
-                    viewModel.redo()
-                }) {
+                    .onTapGesture {
+                        if !viewModel.isPenActive {
+                            viewModel.selectPen()
+                        } else {
+                            isPencilMenuPresented.toggle()
+                        }
+                    }
+                    .onLongPressGesture(minimumDuration: 0.35) {
+                        if !viewModel.isPenActive {
+                            viewModel.selectPen()
+                        }
+                        isPencilMenuPresented = true
+                    }
+                    .popover(isPresented: $isPencilMenuPresented, arrowEdge: .top) {
+                        PencilSettingsMenuView(viewModel: viewModel)
+                            .presentationCompactAdaptation(.popover)
+                    }
+                    .accessibilityLabel("Pen Tool")
+                    
+                    // Eraser Tool with Width & Mode Mini Menu
                     VStack(spacing: 4) {
-                        Image(systemName: "arrow.uturn.forward")
-                            .font(.system(size: 20, weight: .semibold))
-                            .foregroundColor(viewModel.canRedo ? .primary : Color(UIColor.systemGray))
+                        Image(systemName: "eraser.fill")
+                            .font(.system(size: 22, weight: .semibold))
+                            .foregroundColor(viewModel.isEraserActive ? .blue : .primary)
                             .frame(height: 26)
                         
-                        Color.clear
+                        RoundedRectangle(cornerRadius: 1.5)
+                            .fill(viewModel.isEraserActive ? Color.blue : Color.clear)
                             .frame(width: 22, height: 3)
                     }
                     .frame(width: 40)
                     .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel("Redo")
-                
-                Spacer()
-                
-                // Page Column Toggle Icon (2 cards side by side like Notability) on the trailing side
-                Button(action: {
-                    withAnimation(.easeInOut(duration: 0.28)) {
-                        isPageSidebarPresented.toggle()
+                    .onTapGesture {
+                        if !viewModel.isEraserActive {
+                            viewModel.selectEraser()
+                        } else {
+                            isEraserMenuPresented.toggle()
+                        }
                     }
-                }) {
-                    Image(systemName: isPageSidebarPresented ? "rectangle.grid.1x2.fill" : "rectangle.grid.1x2")
-                        .font(.system(size: 20, weight: .medium))
-                        .foregroundColor(isPageSidebarPresented ? .examButton : .primary)
+                    .onLongPressGesture(minimumDuration: 0.35) {
+                        if !viewModel.isEraserActive {
+                            viewModel.selectEraser()
+                        }
+                        isEraserMenuPresented = true
+                    }
+                    .popover(isPresented: $isEraserMenuPresented, arrowEdge: .top) {
+                        EraserSettingsMenuView(viewModel: viewModel)
+                            .presentationCompactAdaptation(.popover)
+                    }
+                    .accessibilityLabel("Eraser Tool")
+                    
+                    // Lasso Tool with Free vs. Square Lasso Mini Menu
+                    VStack(spacing: 4) {
+                        Image(systemName: viewModel.selectedLassoMode == .square ? "rectangle.dashed" : "lasso")
+                            .font(.system(size: 22, weight: .semibold))
+                            .foregroundColor(viewModel.isLassoActive ? .blue : .primary)
+                            .frame(height: 26)
+                        
+                        RoundedRectangle(cornerRadius: 1.5)
+                            .fill(viewModel.isLassoActive ? Color.blue : Color.clear)
+                            .frame(width: 22, height: 3)
+                    }
+                    .frame(width: 40)
+                    .contentShape(Rectangle())
+                    .onTapGesture {
+                        if !viewModel.isLassoActive {
+                            viewModel.selectLasso()
+                        } else {
+                            isLassoMenuPresented.toggle()
+                        }
+                    }
+                    .onLongPressGesture(minimumDuration: 0.35) {
+                        if !viewModel.isLassoActive {
+                            viewModel.selectLasso()
+                        }
+                        isLassoMenuPresented = true
+                    }
+                    .popover(isPresented: $isLassoMenuPresented, arrowEdge: .top) {
+                        LassoSettingsMenuView(viewModel: viewModel)
+                            .presentationCompactAdaptation(.popover)
+                    }
+                    .accessibilityLabel("Lasso Tool")
+                    
+                    // Undo Button with Quick Minimal Blue Flash Tap Animation
+                    Button(action: {
+                        guard viewModel.canUndo else { return }
+                        withAnimation(.easeOut(duration: 0.08)) {
+                            isUndoAnimating = true
+                        }
+                        viewModel.undo()
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.11) {
+                            withAnimation(.easeOut(duration: 0.10)) {
+                                isUndoAnimating = false
+                            }
+                        }
+                    }) {
+                        VStack(spacing: 4) {
+                            Image(systemName: "arrow.uturn.backward")
+                                .font(.system(size: 20, weight: .semibold))
+                                .foregroundColor(
+                                    isUndoAnimating
+                                    ? .blue
+                                    : (viewModel.canUndo ? .primary : Color(UIColor.systemGray))
+                                )
+                                .scaleEffect(isUndoAnimating ? 0.92 : 1.0)
+                                .frame(height: 26)
+                            
+                            Color.clear
+                                .frame(width: 22, height: 3)
+                        }
+                        .frame(width: 40)
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Undo")
+                    
+                    // Redo Button with Quick Minimal Blue Flash Tap Animation
+                    Button(action: {
+                        guard viewModel.canRedo else { return }
+                        withAnimation(.easeOut(duration: 0.08)) {
+                            isRedoAnimating = true
+                        }
+                        viewModel.redo()
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.11) {
+                            withAnimation(.easeOut(duration: 0.10)) {
+                                isRedoAnimating = false
+                            }
+                        }
+                    }) {
+                        VStack(spacing: 4) {
+                            Image(systemName: "arrow.uturn.forward")
+                                .font(.system(size: 20, weight: .semibold))
+                                .foregroundColor(
+                                    isRedoAnimating
+                                    ? .blue
+                                    : (viewModel.canRedo ? .primary : Color(UIColor.systemGray))
+                                )
+                                .scaleEffect(isRedoAnimating ? 0.92 : 1.0)
+                                .frame(height: 26)
+                            
+                            Color.clear
+                                .frame(width: 22, height: 3)
+                        }
+                        .frame(width: 40)
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Redo")
+                    
+                    Spacer()
+                    
+                    // Page Column Toggle Icon (2 cards side by side like Notability) on the trailing side
+                    Button(action: {
+                        withAnimation(.easeInOut(duration: 0.28)) {
+                            isPageSidebarPresented.toggle()
+                        }
+                    }) {
+                        Image(systemName: isPageSidebarPresented ? "rectangle.grid.1x2.fill" : "rectangle.grid.1x2")
+                            .font(.system(size: 20, weight: .medium))
+                            .foregroundColor(isPageSidebarPresented ? .examButton : .primary)
+                    }
+                    .accessibilityLabel("Page Manager")
                 }
-                .accessibilityLabel("Page Manager")
             }
             .padding(.horizontal, 20)
-            .padding(.top, 12)
-            .padding(.bottom, 8)
+            .padding(.top, 16)
+            .padding(.bottom, 12)
             .background(Color(UIColor.systemGroupedBackground))
             .shadow(color: .black.opacity(0.1), radius: 3, y: 2)
             .zIndex(2)
@@ -224,6 +277,7 @@ struct ActiveExamView: View {
                                             set: { viewModel.setDrawing($0, for: 0) }
                                         ),
                                         currentTool: $viewModel.currentTool,
+                                        lassoMode: viewModel.selectedLassoMode,
                                         undoManager: viewModel.undoManager,
                                         onDrawingChanged: {
                                             viewModel.updateUndoRedoState()
@@ -268,6 +322,7 @@ struct ActiveExamView: View {
                                                 set: { viewModel.setDrawing($0, for: pageIdx) }
                                             ),
                                             currentTool: $viewModel.currentTool,
+                                            lassoMode: viewModel.selectedLassoMode,
                                             undoManager: viewModel.undoManager,
                                             onDrawingChanged: {
                                                 viewModel.updateUndoRedoState()
@@ -359,7 +414,86 @@ struct ActiveExamView: View {
                 }
             }
         }
+        .blur(radius: assessmentManager.isAppInactiveDuringExam ? 18 : 0)
         .edgesIgnoringSafeArea(.bottom)
+        .statusBarHidden(true)
+        .persistentSystemOverlays(.hidden)
+        .onAppear {
+            if !assessmentManager.isExamLocked {
+                assessmentManager.beginExamLockdown()
+            }
+        }
+        .overlay(
+            // Security Blur Shield when app switcher / Control Center is opened
+            Group {
+                if assessmentManager.isAppInactiveDuringExam {
+                    ZStack {
+                        Color.black.opacity(0.65)
+                            .edgesIgnoringSafeArea(.all)
+                        VStack(spacing: 12) {
+                            Image(systemName: "lock.shield.fill")
+                                .font(.system(size: 52))
+                                .foregroundColor(.orange)
+                            Text("Exam Protected")
+                                .font(.title2)
+                                .fontWeight(.bold)
+                                .foregroundColor(.white)
+                            Text("Return to ExamPad immediately.")
+                                .font(.subheadline)
+                                .foregroundColor(.white.opacity(0.8))
+                        }
+                    }
+                }
+            }
+        )
+        .overlay(
+            // Tamper / Unauthorized Exit Warning Dialog
+            Group {
+                if assessmentManager.showTamperViolationAlert {
+                    Color.black.opacity(0.5)
+                        .edgesIgnoringSafeArea(.all)
+                    
+                    VStack(spacing: 18) {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .font(.system(size: 48))
+                            .foregroundColor(.orange)
+                        
+                        VStack(spacing: 8) {
+                            Text("Exam Lockdown Warning")
+                                .font(.title3)
+                                .fontWeight(.bold)
+                            
+                            Text("Leaving the exam before submitting is not permitted. This event has been logged (\(assessmentManager.tamperViolationCount) violation\(assessmentManager.tamperViolationCount == 1 ? "" : "s")).")
+                                .font(.subheadline)
+                                .foregroundColor(.secondary)
+                                .multilineTextAlignment(.center)
+                        }
+                        
+                        Button(action: {
+                            assessmentManager.dismissTamperAlert()
+                        }) {
+                            Text("Return to Exam")
+                                .font(.subheadline)
+                                .fontWeight(.bold)
+                                .foregroundColor(.white)
+                                .frame(maxWidth: .infinity, minHeight: 44)
+                                .background(Color.examButton)
+                                .cornerRadius(10)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                    .padding(28)
+                    .frame(width: 370)
+                    .background(Color(UIColor.secondarySystemGroupedBackground))
+                    .cornerRadius(18)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 18)
+                            .stroke(Color.orange.opacity(0.4), lineWidth: 1.5)
+                    )
+                    .shadow(color: .black.opacity(0.3), radius: 16, x: 0, y: 8)
+                }
+            }
+        )
         .overlay(
             // Submission Confirmation Dialog
             Group {

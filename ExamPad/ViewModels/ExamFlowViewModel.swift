@@ -40,11 +40,19 @@ enum EraserMode: String, CaseIterable, Identifiable {
     }
 }
 
+enum LassoMode: String, CaseIterable, Identifiable {
+    case free = "Free Lasso"
+    case square = "Square Lasso"
+    
+    var id: String { rawValue }
+}
+
 @MainActor
 final class ExamFlowViewModel: ObservableObject {
     @Published var currentState: AppFlowState = .start
     
     // Exam State
+    @Published var examTitle: String = "Test Exam 2026 X"
     @Published var gridPageCount: Int = 1
     @Published var showSubmitConfirmation: Bool = false
     @Published var submissionSuccess: Bool = false
@@ -55,6 +63,7 @@ final class ExamFlowViewModel: ObservableObject {
     @Published var selectedPenColor: UIColor = .black
     @Published var selectedPenWidth: CGFloat = 2.5
     @Published var selectedEraserMode: EraserMode = .exact
+    @Published var selectedLassoMode: LassoMode = .free
     @Published var currentTool: PKTool = PKInkingTool(.pen, color: .black, width: 2.5)
     
     // Undo / Redo State
@@ -110,12 +119,13 @@ final class ExamFlowViewModel: ObservableObject {
     
     // Simulates the QR scan bypass for current development stage
     // When QR is integrated, this will decode the payload and transition to .waitingForExam
-    func mockScanAndStart() {
+    func mockScanAndStart(assessmentManager: AssessmentManager? = nil) {
         // Cancel any lingering submission timer and ensure a clean exam state
         submitResetWorkItem?.cancel()
         submitResetWorkItem = nil
         submissionSuccess = false
         showSubmitConfirmation = false
+        assessmentManager?.beginExamLockdown()
         currentState = .activeExam
     }
     
@@ -172,7 +182,10 @@ final class ExamFlowViewModel: ObservableObject {
         currentTool = PKEraserTool(selectedEraserMode.pkEraserType, width: effectiveEraserWidth)
     }
     
-    func selectLasso() {
+    func selectLasso(mode: LassoMode? = nil) {
+        if let mode = mode {
+            selectedLassoMode = mode
+        }
         currentTool = PKLassoTool()
     }
     
@@ -220,6 +233,7 @@ final class ExamFlowViewModel: ObservableObject {
         selectedPenColor = .black
         selectedPenWidth = 2.5
         selectedEraserMode = .exact
+        selectedLassoMode = .free
         currentTool = PKInkingTool(.pen, color: .black, width: 2.5)
         currentState = .start
     }

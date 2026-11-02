@@ -7,6 +7,7 @@ import SwiftUI
 
 struct StartScreenView: View {
     @EnvironmentObject var viewModel: ExamFlowViewModel
+    @EnvironmentObject var assessmentManager: AssessmentManager
     
     var body: some View {
         VStack(spacing: 40) {
@@ -15,8 +16,8 @@ struct StartScreenView: View {
                 .foregroundColor(Color.examTitle)
             
             Button(action: {
-                // Mocks the QR scanning flow and goes straight to exam
-                viewModel.mockScanAndStart()
+                // Mocks the QR scanning flow, locks down the device & notifications, and enters the exam
+                viewModel.mockScanAndStart(assessmentManager: assessmentManager)
             }) {
                 HStack {
                     Image(systemName: "qrcode.viewfinder")
@@ -38,4 +39,5 @@ struct StartScreenView: View {
 #Preview {
     StartScreenView()
         .environmentObject(ExamFlowViewModel())
+        .environmentObject(AssessmentManager())
 }

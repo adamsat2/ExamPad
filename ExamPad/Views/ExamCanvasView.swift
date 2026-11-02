@@ -7,8 +7,9 @@ import SwiftUI
 import PencilKit
 import UIKit
 
-///Non-interfering gesture recognizer that observes Apple Pencil touches in parallel with PencilKit's
-///internal `drawingGestureRecognizer` to power the 0.45s Hold-to-Snap 2D shape engine.
+/// Gesture recognizer that tracks ONLY Apple Pencil touches (`.pencil`).
+/// Finger touches (`.direct`) are ignored so the outer SwiftUI `ScrollView` always scrolls smoothly with fingers,
+/// while Apple Pencil touches are captured exclusively for Hold-to-Snap and Lasso selection/dragging/resizing.
 final class PencilTouchObserverGestureRecognizer: UIGestureRecognizer {
     var onTouchBegan: ((CGPoint, TimeInterval) -> Void)?
     var onTouchMoved: ((CGPoint, TimeInterval) -> Void)?
@@ -36,7 +37,6 @@ final class PencilTouchObserverGestureRecognizer: UIGestureRecognizer {
     override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent) {
         guard let touch = touches.first(where: { $0.type == .pencil }), let view = self.view else { return }
         state = .changed
-        // Capture coalesced touches if available for higher fidelity polygon/circle geometry
         if let coalesced = event.coalescedTouches(for: touch), !coalesced.isEmpty {
             for cTouch in coalesced {
                 onTouchMoved?(cTouch.location(in: view), cTouch.timestamp)
@@ -62,6 +62,12 @@ final class PencilTouchObserverGestureRecognizer: UIGestureRecognizer {
     }
     
     override func canPrevent(_ preventedGestureRecognizer: UIGestureRecognizer) -> Bool {
+        // When the user drags the Apple Pencil, prevent the enclosing UIScrollView's panGestureRecognizer
+        // from scrolling the page while drawing a Lasso or stroke with the Apple Pencil.
+        if preventedGestureRecognizer is UIPanGestureRecognizer,
+           preventedGestureRecognizer.view is UIScrollView {
+            return true
+        }
         return false
     }
     
@@ -70,13 +76,176 @@ final class PencilTouchObserverGestureRecognizer: UIGestureRecognizer {
     }
 }
 
-/// Subclass of PKCanvasView that routes undo/redo actions to a shared document UndoManager
-/// and integrates real-time Hold-to-Snap 2D shape recognition.
+/// Visual overlay view rendered on top of `FixedCanvasView` to show the active Lasso selection path,
+/// selection bounding box, live transformed strokes preview, and interactive corner resize handles for Square Lasso.
+final class LassoSelectionOverlayView: UIView {
+    enum CornerHandle: CaseIterable {
+        case topLeft, topRight, bottomLeft, bottomRight
+    }
+    
+    var lassoMode: LassoMode = .free {
+        didSet { setNeedsDisplay() }
+    }
+    var activeLassoPoints: [CGPoint] = [] {
+        didSet { setNeedsDisplay() }
+    }
+    var activeSquareRect: CGRect? = nil {
+        didSet { setNeedsDisplay() }
+    }
+    var selectionBounds: CGRect? = nil {
+        didSet { setNeedsDisplay() }
+    }
+    var showCornerHandles: Bool = false {
+        didSet { setNeedsDisplay() }
+    }
+    var previewStrokes: [PKStroke] = [] {
+        didSet { setNeedsDisplay() }
+    }
+    
+    private let handleRadius: CGFloat = 7.5
+    private let hitTestRadius: CGFloat = 28.0
+    
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        backgroundColor = .clear
+        isOpaque = false
+        isUserInteractionEnabled = false
+    }
+    
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+    
+    func cornerPosition(for corner: CornerHandle, in rect: CGRect) -> CGPoint {
+        switch corner {
+        case .topLeft: return CGPoint(x: rect.minX, y: rect.minY)
+        case .topRight: return CGPoint(x: rect.maxX, y: rect.minY)
+        case .bottomLeft: return CGPoint(x: rect.minX, y: rect.maxY)
+        case .bottomRight: return CGPoint(x: rect.maxX, y: rect.maxY)
+        }
+    }
+    
+    func hitTestCorner(at point: CGPoint) -> CornerHandle? {
+        guard showCornerHandles, let rect = selectionBounds else { return nil }
+        for corner in CornerHandle.allCases {
+            let pos = cornerPosition(for: corner, in: rect)
+            if hypot(point.x - pos.x, point.y - pos.y) <= hitTestRadius {
+                return corner
+            }
+        }
+        return nil
+    }
+    
+    override func draw(_ rect: CGRect) {
+        guard let ctx = UIGraphicsGetCurrentContext() else { return }
+        
+        let accentBlue = UIColor.systemBlue
+        
+        // 1. Render live preview of selected strokes while moving or resizing
+        if !previewStrokes.isEmpty {
+            let subDrawing = PKDrawing(strokes: previewStrokes)
+            let renderRect = subDrawing.bounds.insetBy(dx: -12, dy: -12).intersection(bounds)
+            if !renderRect.isNull && !renderRect.isEmpty {
+                var image: UIImage?
+                UITraitCollection(userInterfaceStyle: .light).performAsCurrent {
+                    image = subDrawing.image(from: renderRect, scale: UIScreen.main.scale)
+                }
+                image?.draw(in: renderRect)
+            }
+        }
+        
+        // 2. Draw ONLY the active selection mode marquee (Square OR Free, never both)
+        if lassoMode == .square, let marquee = activeSquareRect {
+            ctx.saveGState()
+            ctx.setFillColor(accentBlue.withAlphaComponent(0.08).cgColor)
+            ctx.fill(marquee)
+            ctx.setStrokeColor(accentBlue.cgColor)
+            ctx.setLineWidth(1.8)
+            ctx.setLineDash(phase: 0, lengths: [6, 4])
+            ctx.stroke(marquee)
+            ctx.restoreGState()
+        } else if lassoMode == .free, activeLassoPoints.count >= 2 {
+            ctx.saveGState()
+            let path = UIBezierPath()
+            path.move(to: activeLassoPoints[0])
+            for pt in activeLassoPoints.dropFirst() {
+                path.addLine(to: pt)
+            }
+            accentBlue.withAlphaComponent(0.06).setFill()
+            path.fill()
+            accentBlue.setStroke()
+            path.lineWidth = 1.8
+            path.setLineDash([6, 4], count: 2, phase: 0)
+            path.stroke()
+            ctx.restoreGState()
+        }
+        
+        // 3. Draw committed selection bounding box & visual cues
+        if let selRect = selectionBounds {
+            ctx.saveGState()
+            ctx.setFillColor(accentBlue.withAlphaComponent(0.06).cgColor)
+            ctx.fill(selRect)
+            
+            ctx.setStrokeColor(accentBlue.cgColor)
+            ctx.setLineWidth(1.75)
+            ctx.setLineDash(phase: 0, lengths: [5, 4])
+            ctx.stroke(selRect)
+            ctx.restoreGState()
+            
+            // Draw 4 corner resize handles when Square Lasso is active
+            if showCornerHandles {
+                for corner in CornerHandle.allCases {
+                    let pt = cornerPosition(for: corner, in: selRect)
+                    let handleRect = CGRect(
+                        x: pt.x - handleRadius,
+                        y: pt.y - handleRadius,
+                        width: handleRadius * 2,
+                        height: handleRadius * 2
+                    )
+                    ctx.saveGState()
+                    ctx.setShadow(offset: CGSize(width: 0, height: 1), blur: 2, color: UIColor.black.withAlphaComponent(0.25).cgColor)
+                    ctx.setFillColor(UIColor.white.cgColor)
+                    ctx.fillEllipse(in: handleRect.insetBy(dx: -2, dy: -2))
+                    ctx.restoreGState()
+                    
+                    ctx.saveGState()
+                    ctx.setFillColor(accentBlue.cgColor)
+                    ctx.fillEllipse(in: handleRect)
+                    ctx.restoreGState()
+                }
+            }
+        }
+    }
+}
+
+/// Subclass of PKCanvasView that routes undo/redo actions to a shared document UndoManager,
+/// integrates real-time Hold-to-Snap 2D shape recognition, and provides Apple-Pencil-only Free & Square Lasso
+/// selection (with two-finger pinch-to-resize and Apple Pencil corner-handle dragging) while leaving
+/// 1-finger touches exclusively for page scrolling.
 final class FixedCanvasView: PKCanvasView {
     weak var customUndoManager: UndoManager?
     
     override var undoManager: UndoManager? {
         return customUndoManager ?? super.undoManager
+    }
+    
+    var lassoMode: LassoMode = .free {
+        didSet {
+            if oldValue != lassoMode {
+                clearLassoSelection()
+            }
+            lassoOverlay.lassoMode = lassoMode
+            syncLassoGestureMode()
+        }
+    }
+    
+    var isLassoToolSelected: Bool = false {
+        didSet {
+            if !isLassoToolSelected {
+                clearLassoSelection()
+            }
+            syncLassoGestureMode()
+        }
     }
     
     // MARK: - Hold-to-Snap State
@@ -87,10 +256,68 @@ final class FixedCanvasView: PKCanvasView {
     private var holdTimer: Timer?
     private var preStrokeDrawing: PKDrawing = PKDrawing()
     private(set) var didSnapDuringCurrentTouch: Bool = false
+    private var pendingSnappedDrawing: PKDrawing?
     
     var onShapeSnapped: ((PKDrawing) -> Void)?
     
-    func installShapeRecognitionObserver() {
+    // MARK: - Custom Lasso & Resize State
+    private let lassoOverlay = LassoSelectionOverlayView()
+    private var pinchGesture: UIPinchGestureRecognizer?
+    private weak var configuredEnclosingScrollView: UIScrollView?
+    
+    private var selectedStrokeIndices: [Int] = []
+    private var preTransformDrawing: PKDrawing = PKDrawing()
+    private var unselectedStrokesDuringTransform: [PKStroke] = []
+    private var originalSelectedStrokes: [PKStroke] = []
+    private var currentTransformedSelectedStrokes: [PKStroke] = []
+    private var initialSelectionBounds: CGRect = .zero
+    private var activeCornerDrag: LassoSelectionOverlayView.CornerHandle?
+    private var isMovingSelectedStrokes: Bool = false
+    private var moveStartPoint: CGPoint = .zero
+    private var squareDrawStartPoint: CGPoint?
+    private var freeLassoPoints: [CGPoint] = []
+    private(set) var isTransformingSelection: Bool = false
+    
+    override func didMoveToWindow() {
+        super.didMoveToWindow()
+        configureEnclosingDocumentScrollViewForFingerOnlyScrolling()
+    }
+    
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        if lassoOverlay.superview == nil {
+            addSubview(lassoOverlay)
+        }
+        lassoOverlay.frame = bounds
+        bringSubviewToFront(lassoOverlay)
+        configureEnclosingDocumentScrollViewForFingerOnlyScrolling()
+    }
+    
+    /// Ensures the enclosing SwiftUI document `UIScrollView` ONLY scrolls with finger touches (`.direct`)
+    /// and never steals Apple Pencil touches (`.pencil`).
+    private func configureEnclosingDocumentScrollViewForFingerOnlyScrolling() {
+        var ancestor: UIView? = superview
+        while let current = ancestor {
+            if let scrollView = current as? UIScrollView, scrollView !== self {
+                if configuredEnclosingScrollView !== scrollView {
+                    scrollView.panGestureRecognizer.allowedTouchTypes = [
+                        NSNumber(value: UITouch.TouchType.direct.rawValue)
+                    ]
+                    configuredEnclosingScrollView = scrollView
+                } else if scrollView.panGestureRecognizer.allowedTouchTypes != [
+                    NSNumber(value: UITouch.TouchType.direct.rawValue)
+                ] {
+                    scrollView.panGestureRecognizer.allowedTouchTypes = [
+                        NSNumber(value: UITouch.TouchType.direct.rawValue)
+                    ]
+                }
+                break
+            }
+            ancestor = current.superview
+        }
+    }
+    
+    func installShapeAndLassoObservers() {
         guard touchObserverGesture == nil else { return }
         let observer = PencilTouchObserverGestureRecognizer(target: nil, action: nil)
         observer.delegate = self
@@ -101,21 +328,67 @@ final class FixedCanvasView: PKCanvasView {
         observer.onTouchMoved = { [weak self] point, timestamp in
             self?.handlePencilMoved(to: point, timestamp: timestamp)
         }
-        observer.onTouchEnded = { [weak self] _, _ in
-            self?.handlePencilEndedOrCancelled()
+        observer.onTouchEnded = { [weak self] point, timestamp in
+            self?.handlePencilEnded(at: point, timestamp: timestamp)
         }
         observer.onTouchCancelled = { [weak self] in
-            self?.handlePencilEndedOrCancelled()
+            self?.handlePencilCancelled()
         }
         
         addGestureRecognizer(observer)
         touchObserverGesture = observer
+        
+        // Two-finger pinch gesture to scale selected strokes in both Free and Square Lasso modes.
+        // Single-finger touches are never intercepted so 1-finger scrolling works anywhere on the page.
+        let pinch = UIPinchGestureRecognizer(target: self, action: #selector(handleSelectionPinch(_:)))
+        pinch.cancelsTouchesInView = false
+        pinch.delaysTouchesBegan = false
+        pinch.allowedTouchTypes = [NSNumber(value: UITouch.TouchType.direct.rawValue)]
+        pinch.delegate = self
+        addGestureRecognizer(pinch)
+        pinchGesture = pinch
     }
     
+    func syncLassoGestureMode() {
+        // When Lasso tool is active, disable `drawingGestureRecognizer` so PencilKit's internal
+        // `PKSelectionGestureView` never runs in parallel, while our `PencilTouchObserverGestureRecognizer`
+        // handles all Apple Pencil lasso drawing, moving, and corner resizing.
+        if isLassoToolSelected {
+            drawingGestureRecognizer.isEnabled = false
+        } else {
+            if !drawingGestureRecognizer.isEnabled {
+                drawingGestureRecognizer.isEnabled = true
+            }
+        }
+    }
+    
+    func clearLassoSelection() {
+        selectedStrokeIndices.removeAll()
+        activeCornerDrag = nil
+        isMovingSelectedStrokes = false
+        isTransformingSelection = false
+        squareDrawStartPoint = nil
+        freeLassoPoints.removeAll()
+        lassoOverlay.activeLassoPoints = []
+        lassoOverlay.activeSquareRect = nil
+        lassoOverlay.selectionBounds = nil
+        lassoOverlay.showCornerHandles = false
+        lassoOverlay.previewStrokes = []
+    }
+    
+    // MARK: - Pencil Touch Routing (Hold-to-Snap & Custom Lasso)
+    
     private func handlePencilBegan(at point: CGPoint, timestamp: TimeInterval) {
+        configureEnclosingDocumentScrollViewForFingerOnlyScrolling()
         holdTimer?.invalidate()
         holdTimer = nil
         didSnapDuringCurrentTouch = false
+        pendingSnappedDrawing = nil
+        
+        if isLassoToolSelected {
+            handleLassoPencilBegan(at: point)
+            return
+        }
         
         guard tool is PKInkingTool else {
             capturedPoints.removeAll()
@@ -130,6 +403,11 @@ final class FixedCanvasView: PKCanvasView {
     }
     
     private func handlePencilMoved(to point: CGPoint, timestamp: TimeInterval) {
+        if isLassoToolSelected {
+            handleLassoPencilMoved(to: point)
+            return
+        }
+        
         guard !didSnapDuringCurrentTouch, tool is PKInkingTool else { return }
         
         capturedPoints.append(point)
@@ -146,15 +424,313 @@ final class FixedCanvasView: PKCanvasView {
         }
     }
     
-    private func handlePencilEndedOrCancelled() {
+    private func handlePencilEnded(at point: CGPoint, timestamp: TimeInterval) {
+        if isLassoToolSelected {
+            handleLassoPencilEnded(at: point)
+            return
+        }
+        finishPencilStrokeOrCancel()
+    }
+    
+    private func handlePencilCancelled() {
+        if isLassoToolSelected {
+            if isTransformingSelection {
+                drawing = preTransformDrawing
+                isTransformingSelection = false
+                lassoOverlay.previewStrokes = []
+            }
+            activeCornerDrag = nil
+            isMovingSelectedStrokes = false
+            squareDrawStartPoint = nil
+            freeLassoPoints.removeAll()
+            lassoOverlay.activeLassoPoints = []
+            lassoOverlay.activeSquareRect = nil
+            return
+        }
+        finishPencilStrokeOrCancel()
+    }
+    
+    private func finishPencilStrokeOrCancel() {
         holdTimer?.invalidate()
         holdTimer = nil
         capturedPoints.removeAll()
         capturedTimestamps.removeAll()
+        
+        if let snapped = pendingSnappedDrawing {
+            DispatchQueue.main.async { [weak self] in
+                guard let self = self else { return }
+                if self.drawing != snapped {
+                    self.drawing = snapped
+                }
+                self.onShapeSnapped?(snapped)
+                self.pendingSnappedDrawing = nil
+                self.didSnapDuringCurrentTouch = false
+            }
+        }
     }
+    
+    // MARK: - Apple-Pencil-Only Lasso Selection, Move, & Corner Resize Logic
+    
+    private func beginInteractiveSelectionTransform(currentBounds: CGRect) {
+        preTransformDrawing = drawing
+        initialSelectionBounds = currentBounds
+        isTransformingSelection = true
+        
+        let selectedSet = Set(selectedStrokeIndices)
+        var unselected: [PKStroke] = []
+        var selected: [PKStroke] = []
+        for (i, stroke) in preTransformDrawing.strokes.enumerated() {
+            if selectedSet.contains(i) {
+                selected.append(stroke)
+            } else {
+                unselected.append(stroke)
+            }
+        }
+        unselectedStrokesDuringTransform = unselected
+        originalSelectedStrokes = selected
+        currentTransformedSelectedStrokes = selected
+        
+        // Immediately remove selected strokes from the underlying PKCanvasView so they do NOT remain
+        // at their original position while the user moves or resizes them in the overlay!
+        drawing = PKDrawing(strokes: unselected)
+        lassoOverlay.previewStrokes = selected
+    }
+    
+    private func handleLassoPencilBegan(at point: CGPoint) {
+        // 1. Check if Apple Pencil touched one of the 4 corner resize handles (Square Lasso mode)
+        if let corner = lassoOverlay.hitTestCorner(at: point),
+           !selectedStrokeIndices.isEmpty,
+           let currentBounds = lassoOverlay.selectionBounds {
+            activeCornerDrag = corner
+            isMovingSelectedStrokes = false
+            beginInteractiveSelectionTransform(currentBounds: currentBounds)
+            return
+        }
+        
+        // 2. Check if Apple Pencil touched inside existing selection bounds to move selected strokes
+        if let currentBounds = lassoOverlay.selectionBounds,
+           !selectedStrokeIndices.isEmpty,
+           currentBounds.insetBy(dx: -12, dy: -12).contains(point) {
+            activeCornerDrag = nil
+            isMovingSelectedStrokes = true
+            moveStartPoint = point
+            beginInteractiveSelectionTransform(currentBounds: currentBounds)
+            return
+        }
+        
+        // 3. Otherwise start a new selection with Apple Pencil using ONLY the selected LassoMode (Square OR Free)
+        clearLassoSelection()
+        if lassoMode == .square {
+            squareDrawStartPoint = point
+            lassoOverlay.activeLassoPoints = []
+            lassoOverlay.activeSquareRect = CGRect(origin: point, size: .zero)
+        } else {
+            squareDrawStartPoint = nil
+            lassoOverlay.activeSquareRect = nil
+            freeLassoPoints = [point]
+            lassoOverlay.activeLassoPoints = [point]
+        }
+    }
+    
+    private func handleLassoPencilMoved(to point: CGPoint) {
+        if let corner = activeCornerDrag {
+            applyCornerResize(corner: corner, to: point)
+            return
+        }
+        
+        if isMovingSelectedStrokes {
+            let dx = point.x - moveStartPoint.x
+            let dy = point.y - moveStartPoint.y
+            let translation = CGAffineTransform(translationX: dx, y: dy)
+            updateLiveTransformPreview(translation)
+            lassoOverlay.selectionBounds = initialSelectionBounds.offsetBy(dx: dx, dy: dy)
+            return
+        }
+        
+        if lassoMode == .square, let start = squareDrawStartPoint {
+            let rect = CGRect(
+                x: min(start.x, point.x),
+                y: min(start.y, point.y),
+                width: abs(point.x - start.x),
+                height: abs(point.y - start.y)
+            )
+            lassoOverlay.activeSquareRect = rect
+        } else if lassoMode == .free {
+            freeLassoPoints.append(point)
+            lassoOverlay.activeLassoPoints = freeLassoPoints
+        }
+    }
+    
+    private func handleLassoPencilEnded(at point: CGPoint) {
+        if activeCornerDrag != nil || isMovingSelectedStrokes {
+            finishInteractiveSelectionTransform()
+            activeCornerDrag = nil
+            isMovingSelectedStrokes = false
+            return
+        }
+        
+        if lassoMode == .square, let rect = lassoOverlay.activeSquareRect {
+            lassoOverlay.activeSquareRect = nil
+            squareDrawStartPoint = nil
+            guard rect.width > 6 || rect.height > 6 else { return }
+            selectStrokesInRect(rect)
+        } else if lassoMode == .free {
+            let pts = freeLassoPoints
+            freeLassoPoints.removeAll()
+            lassoOverlay.activeLassoPoints = []
+            guard pts.count >= 3 else { return }
+            selectStrokesInPolygon(pts)
+        }
+    }
+    
+    @objc private func handleSelectionPinch(_ gesture: UIPinchGestureRecognizer) {
+        guard isLassoToolSelected,
+              !selectedStrokeIndices.isEmpty,
+              let currentBounds = lassoOverlay.selectionBounds else { return }
+        
+        switch gesture.state {
+        case .began:
+            beginInteractiveSelectionTransform(currentBounds: currentBounds)
+        case .changed:
+            let scale = max(0.2, min(5.0, gesture.scale))
+            let center = CGPoint(x: initialSelectionBounds.midX, y: initialSelectionBounds.midY)
+            let transform = CGAffineTransform(translationX: center.x, y: center.y)
+                .scaledBy(x: scale, y: scale)
+                .translatedBy(x: -center.x, y: -center.y)
+            updateLiveTransformPreview(transform)
+            lassoOverlay.selectionBounds = initialSelectionBounds.applying(transform)
+        case .ended, .cancelled:
+            finishInteractiveSelectionTransform()
+        default:
+            break
+        }
+    }
+    
+    private func applyCornerResize(corner: LassoSelectionOverlayView.CornerHandle, to point: CGPoint) {
+        let orig = initialSelectionBounds
+        guard orig.width > 4 && orig.height > 4 else { return }
+        
+        let anchor: CGPoint
+        var newMinX = orig.minX
+        var newMaxX = orig.maxX
+        var newMinY = orig.minY
+        var newMaxY = orig.maxY
+        
+        switch corner {
+        case .topLeft:
+            anchor = CGPoint(x: orig.maxX, y: orig.maxY)
+            newMinX = min(point.x, anchor.x - 16)
+            newMinY = min(point.y, anchor.y - 16)
+        case .topRight:
+            anchor = CGPoint(x: orig.minX, y: orig.maxY)
+            newMaxX = max(point.x, anchor.x + 16)
+            newMinY = min(point.y, anchor.y - 16)
+        case .bottomLeft:
+            anchor = CGPoint(x: orig.maxX, y: orig.minY)
+            newMinX = min(point.x, anchor.x - 16)
+            newMaxY = max(point.y, anchor.y + 16)
+        case .bottomRight:
+            anchor = CGPoint(x: orig.minX, y: orig.minY)
+            newMaxX = max(point.x, anchor.x + 16)
+            newMaxY = max(point.y, anchor.y + 16)
+        }
+        
+        let newRect = CGRect(x: newMinX, y: newMinY, width: newMaxX - newMinX, height: newMaxY - newMinY)
+        let sx = newRect.width / orig.width
+        let sy = newRect.height / orig.height
+        
+        let transform = CGAffineTransform(translationX: anchor.x, y: anchor.y)
+            .scaledBy(x: sx, y: sy)
+            .translatedBy(x: -anchor.x, y: -anchor.y)
+        
+        updateLiveTransformPreview(transform)
+        lassoOverlay.selectionBounds = newRect
+    }
+    
+    private func updateLiveTransformPreview(_ transform: CGAffineTransform) {
+        let transformedSubDrawing = PKDrawing(strokes: originalSelectedStrokes).transformed(using: transform)
+        currentTransformedSelectedStrokes = transformedSubDrawing.strokes
+        lassoOverlay.previewStrokes = currentTransformedSelectedStrokes
+    }
+    
+    private func finishInteractiveSelectionTransform() {
+        guard isTransformingSelection else { return }
+        isTransformingSelection = false
+        lassoOverlay.previewStrokes = []
+        
+        // Reconstruct full drawing with the transformed strokes in their original z-order indices
+        var allStrokes = preTransformDrawing.strokes
+        let selectedSet = Set(selectedStrokeIndices)
+        var tIdx = 0
+        for i in 0..<allStrokes.count where selectedSet.contains(i) {
+            if tIdx < currentTransformedSelectedStrokes.count {
+                allStrokes[i] = currentTransformedSelectedStrokes[tIdx]
+                tIdx += 1
+            }
+        }
+        
+        let finalDrawing = PKDrawing(strokes: allStrokes)
+        applyDrawingWithUndo(from: preTransformDrawing, to: finalDrawing, actionName: "Transform Selection")
+        updateSelectionState(indices: selectedStrokeIndices)
+    }
+    
+    private func selectStrokesInRect(_ rect: CGRect) {
+        var matched: [Int] = []
+        for (idx, stroke) in drawing.strokes.enumerated() {
+            if rect.intersects(stroke.renderBounds) {
+                matched.append(idx)
+            }
+        }
+        updateSelectionState(indices: matched)
+    }
+    
+    private func selectStrokesInPolygon(_ polygon: [CGPoint]) {
+        let bezier = UIBezierPath()
+        bezier.move(to: polygon[0])
+        for pt in polygon.dropFirst() {
+            bezier.addLine(to: pt)
+        }
+        bezier.close()
+        
+        var matched: [Int] = []
+        for (idx, stroke) in drawing.strokes.enumerated() {
+            let bounds = stroke.renderBounds
+            let center = CGPoint(x: bounds.midX, y: bounds.midY)
+            if bezier.contains(center) {
+                matched.append(idx)
+                continue
+            }
+            for pt in stroke.path.interpolatedPoints(by: .distance(12)) {
+                if bezier.contains(pt.location) {
+                    matched.append(idx)
+                    break
+                }
+            }
+        }
+        updateSelectionState(indices: matched)
+    }
+    
+    private func updateSelectionState(indices: [Int]) {
+        selectedStrokeIndices = indices
+        guard !indices.isEmpty else {
+            clearLassoSelection()
+            return
+        }
+        var unionRect = CGRect.null
+        for idx in indices where idx < drawing.strokes.count {
+            unionRect = unionRect.union(drawing.strokes[idx].renderBounds)
+        }
+        if !unionRect.isNull {
+            lassoOverlay.selectionBounds = unionRect.insetBy(dx: -8, dy: -8)
+            lassoOverlay.showCornerHandles = (lassoMode == .square)
+        }
+    }
+    
+    // MARK: - Hold-to-Snap Recognition
     
     private func attemptHoldToSnap() {
         guard !didSnapDuringCurrentTouch,
+              !isLassoToolSelected,
               let inkingTool = tool as? PKInkingTool,
               capturedPoints.count >= 2 else { return }
         
@@ -168,30 +744,54 @@ final class FixedCanvasView: PKCanvasView {
         let snappedStroke = ShapeRecognitionEngine.createPKStroke(from: recognized, tool: inkingTool)
         let previousDrawing = preStrokeDrawing
         
-        // Cancel the active raw PencilKit touch stream so lifting the pen won't append the raw freehand stroke
-        drawingGestureRecognizer.isEnabled = false
-        drawingGestureRecognizer.isEnabled = true
-        
-        // Build the new drawing by replacing the in-progress stroke with our clean geometric PKStroke
+        // Build the new drawing by appending the clean geometric PKStroke onto preStrokeDrawing
         var updatedStrokes = previousDrawing.strokes
         updatedStrokes.append(snappedStroke)
         let snappedDrawing = PKDrawing(strokes: updatedStrokes)
+        pendingSnappedDrawing = snappedDrawing
         
-        applyDrawingWithUndo(from: previousDrawing, to: snappedDrawing)
+        // Cancel the active raw PencilKit touch stream FIRST so PencilKit aborts the freehand stroke
+        drawingGestureRecognizer.isEnabled = false
+        drawingGestureRecognizer.isEnabled = true
+        
+        // Apply immediately so the user sees the snapped shape right at 0.45s
+        drawing = snappedDrawing
+        onShapeSnapped?(snappedDrawing)
+        
+        // Also apply on the next runloop tick after PKTiledView finishes its async gesture cancellation cleanup,
+        // ensuring PencilKit's rollback to preStrokeDrawing never erases our snapped shape.
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            self.applyDrawingWithUndo(from: previousDrawing, to: snappedDrawing, actionName: "Snap Shape")
+        }
         
         let generator = UIImpactFeedbackGenerator(style: .medium)
         generator.prepare()
         generator.impactOccurred()
     }
     
-    private func applyDrawingWithUndo(from oldDrawing: PKDrawing, to newDrawing: PKDrawing) {
-        drawing = newDrawing
+    func enforcePendingSnappedDrawingIfNeeded() -> Bool {
+        guard let snapped = pendingSnappedDrawing else { return false }
+        if drawing != snapped {
+            drawing = snapped
+        }
+        onShapeSnapped?(snapped)
+        return true
+    }
+    
+    private func applyDrawingWithUndo(from oldDrawing: PKDrawing, to newDrawing: PKDrawing, actionName: String) {
+        if drawing != newDrawing {
+            drawing = newDrawing
+        }
         onShapeSnapped?(newDrawing)
         
         undoManager?.registerUndo(withTarget: self) { target in
-            target.applyDrawingWithUndo(from: newDrawing, to: oldDrawing)
+            target.pendingSnappedDrawing = nil
+            target.didSnapDuringCurrentTouch = false
+            target.clearLassoSelection()
+            target.applyDrawingWithUndo(from: newDrawing, to: oldDrawing, actionName: actionName)
         }
-        undoManager?.setActionName("Snap Shape")
+        undoManager?.setActionName(actionName)
     }
 }
 
@@ -200,13 +800,30 @@ extension FixedCanvasView: UIGestureRecognizerDelegate {
         _ gestureRecognizer: UIGestureRecognizer,
         shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer
     ) -> Bool {
-        return true
+        // Never allow the enclosing UIScrollView's panGestureRecognizer to recognize simultaneously
+        // with our Apple Pencil touch observer (`touchObserverGesture`).
+        if (gestureRecognizer === touchObserverGesture && otherGestureRecognizer.view is UIScrollView) ||
+           (otherGestureRecognizer === touchObserverGesture && gestureRecognizer.view is UIScrollView) {
+            return false
+        }
+        if gestureRecognizer === touchObserverGesture || otherGestureRecognizer === touchObserverGesture {
+            return true
+        }
+        return false
+    }
+    
+    override func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
+        if gestureRecognizer === pinchGesture {
+            return isLassoToolSelected && !selectedStrokeIndices.isEmpty && gestureRecognizer.numberOfTouches >= 2
+        }
+        return super.gestureRecognizerShouldBegin(gestureRecognizer)
     }
 }
 
 struct ExamCanvasView: UIViewRepresentable {
     @Binding var drawing: PKDrawing
     @Binding var currentTool: PKTool
+    var lassoMode: LassoMode = .free
     var undoManager: UndoManager? = nil
     var onDrawingChanged: (() -> Void)? = nil
     
@@ -230,10 +847,10 @@ struct ExamCanvasView: UIViewRepresentable {
         
         func canvasViewDidEndUsingTool(_ canvasView: PKCanvasView) {
             isUsingTool = false
-            // If Hold-to-Snap already committed the geometric shape and cancelled the raw touch,
-            // do not let the cancelled raw stroke overwrite the snapped shape.
-            if let fixed = canvasView as? FixedCanvasView, fixed.didSnapDuringCurrentTouch {
-                return
+            if let fixed = canvasView as? FixedCanvasView {
+                if fixed.enforcePendingSnappedDrawingIfNeeded() || fixed.isTransformingSelection {
+                    return
+                }
             }
             commitDrawing(canvasView)
         }
@@ -241,8 +858,14 @@ struct ExamCanvasView: UIViewRepresentable {
         func canvasViewDrawingDidChange(_ canvasView: PKCanvasView) {
             // Guard against recursive events triggered by makeUIView / updateUIView
             guard !isUpdatingFromSwiftUI else { return }
-            if let fixed = canvasView as? FixedCanvasView, fixed.didSnapDuringCurrentTouch && isUsingTool {
-                return
+            if let fixed = canvasView as? FixedCanvasView {
+                if fixed.didSnapDuringCurrentTouch {
+                    _ = fixed.enforcePendingSnappedDrawingIfNeeded()
+                    return
+                }
+                if fixed.isTransformingSelection {
+                    return
+                }
             }
             // If the user is drawing, we commit when the stroke ends (pen lifts)
             if !isUsingTool {
@@ -298,10 +921,14 @@ struct ExamCanvasView: UIViewRepresentable {
         context.coordinator.lastCanvasDrawing = drawing
         
         canvasView.delegate = context.coordinator
-        canvasView.installShapeRecognitionObserver()
-        canvasView.onShapeSnapped = { [weak canvasView] _ in
+        canvasView.installShapeAndLassoObservers()
+        canvasView.lassoMode = lassoMode
+        let isLasso = (currentTool is PKLassoTool)
+        canvasView.isLassoToolSelected = isLasso
+        canvasView.onShapeSnapped = { [weak canvasView] snappedDrawing in
             guard let canvasView = canvasView else { return }
             context.coordinator.isUsingTool = false
+            context.coordinator.lastCanvasDrawing = snappedDrawing
             context.coordinator.commitDrawing(canvasView)
         }
         
@@ -318,15 +945,26 @@ struct ExamCanvasView: UIViewRepresentable {
         
         // Forces black ink to stay black even if the device is in dark mode
         canvasView.overrideUserInterfaceStyle = .light
-        canvasView.tool = currentTool
+        
+        // Never assign PKLassoTool directly to PKCanvasView.tool—otherwise PKSelectionGestureView
+        // activates its built-in freehand lasso simultaneously and duplicates strokes.
+        if !isLasso {
+            canvasView.tool = currentTool
+        }
         return canvasView
     }
     
     func updateUIView(_ uiView: PKCanvasView, context: Context) {
         context.coordinator.parent = self
+        let isLasso = (currentTool is PKLassoTool)
         
         if let fixedCanvas = uiView as? FixedCanvasView {
             fixedCanvas.customUndoManager = undoManager
+            fixedCanvas.lassoMode = lassoMode
+            fixedCanvas.isLassoToolSelected = isLasso
+            if fixedCanvas.didSnapDuringCurrentTouch || fixedCanvas.isTransformingSelection {
+                return
+            }
         }
         
         // Only reload uiView.drawing if an external action modified `drawing` (e.g. Undo, Redo, or reset exam).
@@ -349,8 +987,8 @@ struct ExamCanvasView: UIViewRepresentable {
             }
         }
         
-        // Only update tool if changed to prevent resetting active tool state mid-stroke
-        if !context.coordinator.isSameTool(uiView.tool, currentTool) {
+        // Only update PKCanvasView.tool for non-lasso tools so PKSelectionGestureView never interferes
+        if !isLasso && !context.coordinator.isSameTool(uiView.tool, currentTool) {
             uiView.tool = currentTool
         }
         if uiView.drawingPolicy != .pencilOnly {

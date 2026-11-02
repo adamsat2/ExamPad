@@ -261,7 +261,7 @@ enum ShapeRecognitionEngine {
         let simp1 = rdpSimplify(firstHalf, epsilon: epsilon)
         let simp2 = rdpSimplify(secondHalf, epsilon: epsilon)
         
-        var vertices = Array(simp1.dropLast()) + Array(simp2.dropLast())
+        let vertices = Array(simp1.dropLast()) + Array(simp2.dropLast())
         
         var merged: [CGPoint] = []
         for v in vertices {
