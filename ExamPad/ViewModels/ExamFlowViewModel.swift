@@ -24,6 +24,22 @@ enum AppFlowState: Equatable {
     }
 }
 
+enum EraserMode: String, CaseIterable, Identifiable {
+    case exact = "Pixel"
+    case connected = "Whole Stroke"
+    
+    var id: String { rawValue }
+    
+    var pkEraserType: PKEraserTool.EraserType {
+        switch self {
+        case .exact:
+            return .fixedWidthBitmap
+        case .connected:
+            return .vector
+        }
+    }
+}
+
 @MainActor
 final class ExamFlowViewModel: ObservableObject {
     @Published var currentState: AppFlowState = .start
@@ -37,13 +53,23 @@ final class ExamFlowViewModel: ObservableObject {
     
     // PencilKit Tool State
     @Published var selectedPenColor: UIColor = .black
-    @Published var selectedPenWidth: CGFloat = 2.0
-    @Published var currentTool: PKTool = PKInkingTool(.pen, color: .black, width: 2.0)
+    @Published var selectedPenWidth: CGFloat = 2.5
+    @Published var selectedEraserMode: EraserMode = .exact
+    @Published var currentTool: PKTool = PKInkingTool(.pen, color: .black, width: 2.5)
     
     // Undo / Redo State
     let undoManager = UndoManager()
     @Published var canUndo: Bool = false
     @Published var canRedo: Bool = false
+    
+    private var submitResetWorkItem: DispatchWorkItem?
+    
+    /// Maps the shared stroke width slider (`1.0...12.0`) to a balanced eraser width (`16.4...64.0`).
+    var effectiveEraserWidth: CGFloat {
+        let clamped = min(max(selectedPenWidth, 1.0), 12.0)
+        let normalized = (clamped - 1.0) / 11.0
+        return 16.4 + normalized * 47.6
+    }
     
     func updateUndoRedoState() {
         let newCanUndo = undoManager.canUndo
@@ -85,7 +111,11 @@ final class ExamFlowViewModel: ObservableObject {
     // Simulates the QR scan bypass for current development stage
     // When QR is integrated, this will decode the payload and transition to .waitingForExam
     func mockScanAndStart() {
-        // Bypass directly to the exam 
+        // Cancel any lingering submission timer and ensure a clean exam state
+        submitResetWorkItem?.cancel()
+        submitResetWorkItem = nil
+        submissionSuccess = false
+        showSubmitConfirmation = false
         currentState = .activeExam
     }
     
@@ -113,6 +143,15 @@ final class ExamFlowViewModel: ObservableObject {
         updateUndoRedoState()
     }
     
+    func updateStrokeWidth(_ width: CGFloat) {
+        selectedPenWidth = width
+        if isPenActive {
+            currentTool = PKInkingTool(.pen, color: selectedPenColor, width: selectedPenWidth)
+        } else if isEraserActive {
+            currentTool = PKEraserTool(selectedEraserMode.pkEraserType, width: effectiveEraserWidth)
+        }
+    }
+    
     func selectPen(color: UIColor? = nil, width: CGFloat? = nil) {
         if let color = color {
             selectedPenColor = color
@@ -123,8 +162,14 @@ final class ExamFlowViewModel: ObservableObject {
         currentTool = PKInkingTool(.pen, color: selectedPenColor, width: selectedPenWidth)
     }
     
-    func selectEraser() {
-        currentTool = PKEraserTool(.bitmap)
+    func selectEraser(mode: EraserMode? = nil, width: CGFloat? = nil) {
+        if let mode = mode {
+            selectedEraserMode = mode
+        }
+        if let width = width {
+            selectedPenWidth = width
+        }
+        currentTool = PKEraserTool(selectedEraserMode.pkEraserType, width: effectiveEraserWidth)
     }
     
     func selectLasso() {
@@ -143,27 +188,39 @@ final class ExamFlowViewModel: ObservableObject {
     
     func submitExam(assessmentManager: AssessmentManager) {
         // TODO: Integrate multipart form data upload to Supervisor App / Backend
+        submitResetWorkItem?.cancel()
         
         submissionSuccess = true
         showSubmitConfirmation = false
         
-        // Simulating the delay of network upload
-        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in
-            self?.resetToStart(assessmentManager: assessmentManager)
+        let workItem = DispatchWorkItem { [weak self] in
+            self?.finishSubmissionAndReturnHome(assessmentManager: assessmentManager)
         }
+        submitResetWorkItem = workItem
+        
+        // Simulating the delay of network upload
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0, execute: workItem)
+    }
+    
+    func finishSubmissionAndReturnHome(assessmentManager: AssessmentManager) {
+        submitResetWorkItem?.cancel()
+        submitResetWorkItem = nil
+        resetToStart(assessmentManager: assessmentManager)
     }
     
     private func resetToStart(assessmentManager: AssessmentManager) {
         assessmentManager.endExamLockdown()
         submissionSuccess = false
+        showSubmitConfirmation = false
         gridPageCount = 1
         pageDrawings.removeAll()
         undoManager.removeAllActions()
         updateUndoRedoState()
         drawingRevision = 0
         selectedPenColor = .black
-        selectedPenWidth = 2.0
-        currentTool = PKInkingTool(.pen, color: .black, width: 2.0)
+        selectedPenWidth = 2.5
+        selectedEraserMode = .exact
+        currentTool = PKInkingTool(.pen, color: .black, width: 2.5)
         currentState = .start
     }
 }

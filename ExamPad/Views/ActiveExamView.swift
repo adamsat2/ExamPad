@@ -12,9 +12,11 @@ struct ActiveExamView: View {
     
     @State private var isPageSidebarPresented: Bool = false
     @State private var isPencilMenuPresented: Bool = false
+    @State private var isEraserMenuPresented: Bool = false
     @State private var currentPageIndex: Int = 0
     
-    private let pageSpacing: CGFloat = 24
+    private let pageSpacing: CGFloat = 36
+    private let horizontalPageMargin: CGFloat = 36
     private let sidebarWidth: CGFloat = 210
     
     var body: some View {
@@ -67,7 +69,8 @@ struct ActiveExamView: View {
                 }
                 .accessibilityLabel("Pen Tool")
                 
-                // Eraser Tool
+                // Eraser Tool with Width & Mode Mini Menu
+                // Active state uses a clean Staedtler Mars Plastic style (cobalt blue sleeve + crisp white tip)
                 VStack(spacing: 4) {
                     Image(systemName: "eraser.fill")
                         .font(.system(size: 22, weight: .semibold))
@@ -76,10 +79,10 @@ struct ActiveExamView: View {
                             AnyShapeStyle(
                                 LinearGradient(
                                     stops: [
-                                        .init(color: Color(red: 0.92, green: 0.93, blue: 0.96), location: 0.0),
-                                        .init(color: Color(red: 0.92, green: 0.93, blue: 0.96), location: 0.52),
-                                        .init(color: Color(red: 0.96, green: 0.50, blue: 0.62), location: 0.52),
-                                        .init(color: Color(red: 0.96, green: 0.50, blue: 0.62), location: 1.0)
+                                        .init(color: Color(red: 0.18, green: 0.50, blue: 0.92), location: 0.0),
+                                        .init(color: Color(red: 0.18, green: 0.50, blue: 0.92), location: 0.54),
+                                        .init(color: Color(red: 0.90, green: 0.94, blue: 0.99), location: 0.54),
+                                        .init(color: Color(red: 0.90, green: 0.94, blue: 0.99), location: 1.0)
                                     ],
                                     startPoint: .topTrailing,
                                     endPoint: .bottomLeading
@@ -95,7 +98,21 @@ struct ActiveExamView: View {
                 .frame(width: 40)
                 .contentShape(Rectangle())
                 .onTapGesture {
-                    viewModel.selectEraser()
+                    if !viewModel.isEraserActive {
+                        viewModel.selectEraser()
+                    } else {
+                        isEraserMenuPresented.toggle()
+                    }
+                }
+                .onLongPressGesture(minimumDuration: 0.35) {
+                    if !viewModel.isEraserActive {
+                        viewModel.selectEraser()
+                    }
+                    isEraserMenuPresented = true
+                }
+                .popover(isPresented: $isEraserMenuPresented, arrowEdge: .top) {
+                    EraserSettingsMenuView(viewModel: viewModel)
+                        .presentationCompactAdaptation(.popover)
                 }
                 .accessibilityLabel("Eraser Tool")
                 
@@ -161,7 +178,7 @@ struct ActiveExamView: View {
                 
                 // Page Column Toggle Icon (2 cards side by side like Notability) on the trailing side
                 Button(action: {
-                    withAnimation(.easeInOut(duration: 0.25)) {
+                    withAnimation(.easeInOut(duration: 0.28)) {
                         isPageSidebarPresented.toggle()
                     }
                 }) {
@@ -176,17 +193,25 @@ struct ActiveExamView: View {
             .padding(.bottom, 8)
             .background(Color(UIColor.systemGroupedBackground))
             .shadow(color: .black.opacity(0.1), radius: 3, y: 2)
+            .zIndex(2)
             
             // Dynamic Document Area & Trailing Page Column
             ScrollViewReader { scrollProxy in
                 GeometryReader { fullGeo in
-                    // Page dimensions remain constant regardless of sidebar visibility
-                    let pageWidth = fullGeo.size.width
-                    let pageHeight = pageWidth * 1.414
+                    let basePageWidth = max(fullGeo.size.width - (horizontalPageMargin * 2), 200)
+                    let basePageHeight = basePageWidth * 1.414
+                    
+                    let availableContainerWidth = isPageSidebarPresented
+                        ? max(fullGeo.size.width - sidebarWidth, 240)
+                        : fullGeo.size.width
+                    let displayedPageWidth = max(availableContainerWidth - (horizontalPageMargin * 2), 180)
+                    let scaleFactor = displayedPageWidth / basePageWidth
+                    let displayedPageHeight = basePageHeight * scaleFactor
+                    
                     let viewportHeight = fullGeo.size.height
                     let totalPages = 1 + viewModel.gridPageCount
                     
-                    ZStack(alignment: .trailing) {
+                    HStack(spacing: 0) {
                         ScrollView {
                             VStack(spacing: pageSpacing) {
                                 // Page 0: Questionnaire Page with its dedicated canvas
@@ -205,8 +230,15 @@ struct ActiveExamView: View {
                                         }
                                     )
                                 }
-                                .frame(width: pageWidth, height: pageHeight)
-                                .shadow(color: .black.opacity(0.15), radius: 8, x: 0, y: 4)
+                                .frame(width: basePageWidth, height: basePageHeight)
+                                .clipShape(RoundedRectangle(cornerRadius: 8))
+                                .overlay(
+                                    RoundedRectangle(cornerRadius: 8)
+                                        .stroke(Color.primary.opacity(0.28), lineWidth: 1.5)
+                                )
+                                .shadow(color: .black.opacity(0.24), radius: 10, x: 0, y: 5)
+                                .scaleEffect(scaleFactor)
+                                .frame(width: displayedPageWidth, height: displayedPageHeight)
                                 .id(0)
                                 .background(
                                     GeometryReader { pageGeo in
@@ -242,8 +274,15 @@ struct ActiveExamView: View {
                                             }
                                         )
                                     }
-                                    .frame(width: pageWidth, height: pageHeight)
-                                    .shadow(color: .black.opacity(0.15), radius: 8, x: 0, y: 4)
+                                    .frame(width: basePageWidth, height: basePageHeight)
+                                    .clipShape(RoundedRectangle(cornerRadius: 8))
+                                    .overlay(
+                                        RoundedRectangle(cornerRadius: 8)
+                                            .stroke(Color.primary.opacity(0.28), lineWidth: 1.5)
+                                    )
+                                    .shadow(color: .black.opacity(0.24), radius: 10, x: 0, y: 5)
+                                    .scaleEffect(scaleFactor)
+                                    .frame(width: displayedPageWidth, height: displayedPageHeight)
                                     .id(pageIdx)
                                     .background(
                                         GeometryReader { pageGeo in
@@ -262,8 +301,12 @@ struct ActiveExamView: View {
                                     )
                                 }
                             }
-                            .padding(.vertical, 20)
+                            .padding(.vertical, 28)
+                            .padding(.horizontal, horizontalPageMargin)
+                            .frame(width: availableContainerWidth)
                         }
+                        .frame(width: availableContainerWidth)
+                        .background(Color(UIColor.systemGray4).opacity(0.55))
                         .coordinateSpace(name: "ExamDocumentScrollView")
                         .onPreferenceChange(PageFramePreferenceKey.self) { frames in
                             let centerTarget = viewportHeight / 2.0
@@ -283,15 +326,15 @@ struct ActiveExamView: View {
                             }
                         }
                         
-                        // Trailing slide-over sidebar column
+                        // Trailing sidebar column that smoothly resizes the document canvas area
                         if isPageSidebarPresented {
                             ExamPageSidebarView(
                                 pageCount: totalPages,
                                 currentPageIndex: currentPageIndex,
                                 getDrawing: { viewModel.drawing(for: $0) },
                                 drawingVersion: viewModel.drawingRevision,
-                                pageWidth: pageWidth,
-                                pageHeight: pageHeight,
+                                pageWidth: basePageWidth,
+                                pageHeight: basePageHeight,
                                 onSelectPage: { selectedIndex in
                                     withAnimation {
                                         scrollProxy.scrollTo(selectedIndex, anchor: .top)
@@ -312,6 +355,7 @@ struct ActiveExamView: View {
                             .shadow(color: .black.opacity(0.18), radius: 8, x: -3, y: 0)
                         }
                     }
+                    .animation(.easeInOut(duration: 0.28), value: isPageSidebarPresented)
                 }
             }
         }
@@ -320,33 +364,62 @@ struct ActiveExamView: View {
             // Submission Confirmation Dialog
             Group {
                 if viewModel.showSubmitConfirmation {
-                    Color.black.opacity(0.4)
+                    Color.black.opacity(0.45)
                         .edgesIgnoringSafeArea(.all)
                     
-                    VStack(spacing: 20) {
-                        Text("Ready to submit?")
-                            .font(.headline)
-                        Text("You cannot edit your exam once submitted.")
-                            .font(.subheadline)
-                            .foregroundColor(.gray)
+                    VStack(spacing: 22) {
+                        VStack(spacing: 8) {
+                            Text("Ready to submit?")
+                                .font(.title3)
+                                .fontWeight(.bold)
+                            Text("You cannot edit your exam once submitted.")
+                                .font(.subheadline)
+                                .foregroundColor(.secondary)
+                                .multilineTextAlignment(.center)
+                        }
                         
-                        HStack(spacing: 20) {
-                            Button("Cancel") {
+                        HStack(spacing: 14) {
+                            Button(action: {
                                 viewModel.showSubmitConfirmation = false
+                            }) {
+                                Text("Cancel")
+                                    .font(.subheadline)
+                                    .fontWeight(.semibold)
+                                    .foregroundColor(.primary)
+                                    .frame(maxWidth: .infinity, minHeight: 44)
+                                    .background(Color(UIColor.tertiarySystemFill))
+                                    .cornerRadius(10)
+                                    .overlay(
+                                        RoundedRectangle(cornerRadius: 10)
+                                            .stroke(Color.primary.opacity(0.15), lineWidth: 1)
+                                    )
                             }
-                            .foregroundColor(.secondary)
+                            .buttonStyle(.plain)
                             
-                            Button("Confirm Submit") {
+                            Button(action: {
                                 viewModel.submitExam(assessmentManager: assessmentManager)
+                            }) {
+                                Text("Confirm Submit")
+                                    .font(.subheadline)
+                                    .fontWeight(.bold)
+                                    .foregroundColor(.white)
+                                    .frame(maxWidth: .infinity, minHeight: 44)
+                                    .background(Color.red)
+                                    .cornerRadius(10)
+                                    .shadow(color: Color.red.opacity(0.3), radius: 4, x: 0, y: 2)
                             }
-                            .foregroundColor(.red)
-                            .fontWeight(.bold)
+                            .buttonStyle(.plain)
                         }
                     }
-                    .padding(30)
-                    .background(Color(UIColor.systemBackground))
-                    .cornerRadius(16)
-                    .shadow(radius: 10)
+                    .padding(28)
+                    .frame(width: 360)
+                    .background(Color(UIColor.secondarySystemGroupedBackground))
+                    .cornerRadius(18)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 18)
+                            .stroke(Color.primary.opacity(0.12), lineWidth: 1)
+                    )
+                    .shadow(color: .black.opacity(0.25), radius: 16, x: 0, y: 8)
                 }
             }
         )
@@ -367,18 +440,25 @@ struct ActiveExamView: View {
                             .fontWeight(.bold)
                         
                         Text("Returning to start screen...")
-                            .foregroundColor(.gray)
+                            .foregroundColor(.secondary)
                         
-                        Button("Done") {
-                            viewModel.currentState = .start
+                        Button(action: {
+                            viewModel.finishSubmissionAndReturnHome(assessmentManager: assessmentManager)
+                        }) {
+                            Text("Done")
+                                .font(.subheadline)
+                                .fontWeight(.bold)
+                                .foregroundColor(.white)
+                                .frame(width: 140, height: 42)
+                                .background(Color.examButton)
+                                .cornerRadius(10)
                         }
-                        .buttonStyle(.borderedProminent)
-                        .tint(.examButton)
+                        .buttonStyle(.plain)
                     }
                     .padding(30)
-                    .background(Color(UIColor.systemBackground))
-                    .cornerRadius(16)
-                    .shadow(radius: 10)
+                    .background(Color(UIColor.secondarySystemGroupedBackground))
+                    .cornerRadius(18)
+                    .shadow(radius: 12)
                 }
             }
         )
