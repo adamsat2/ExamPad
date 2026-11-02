@@ -8,7 +8,6 @@ import Combine
 import AutomaticAssessmentConfiguration
 import UIKit
 import UserNotifications
-import ObjectiveC
 
 /// Runtime hooks and state used to enforce full-screen lock and block window corner-swipe / resize gestures
 /// while `isLocked == true` (from exam entry until the user submits the exam AND returns to the home screen).
