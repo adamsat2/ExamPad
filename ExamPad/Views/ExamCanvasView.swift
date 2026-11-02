@@ -77,7 +77,7 @@ final class PencilTouchObserverGestureRecognizer: UIGestureRecognizer {
 }
 
 /// Visual overlay view rendered on top of `FixedCanvasView` to show the active Lasso selection path,
-/// selection bounding box, live transformed strokes preview, and interactive corner resize handles for Square Lasso.
+/// committed Freehand or Square selection outline, live transformed strokes preview, and interactive corner resize handles.
 final class LassoSelectionOverlayView: UIView {
     enum CornerHandle: CaseIterable {
         case topLeft, topRight, bottomLeft, bottomRight
@@ -90,6 +90,11 @@ final class LassoSelectionOverlayView: UIView {
         didSet { setNeedsDisplay() }
     }
     var activeSquareRect: CGRect? = nil {
+        didSet { setNeedsDisplay() }
+    }
+    /// When the user selects strokes in Free Lasso mode, this stores the exact freehand loop they drew
+    /// (or the organic contour around a tapped/pasted stroke) so it stays in the shape they created rather than turning into a square.
+    var committedFreeLassoPolygon: [CGPoint] = [] {
         didSet { setNeedsDisplay() }
     }
     var selectionBounds: CGRect? = nil {
@@ -136,6 +141,24 @@ final class LassoSelectionOverlayView: UIView {
         return nil
     }
     
+    func containsSelectionPoint(_ point: CGPoint) -> Bool {
+        if !committedFreeLassoPolygon.isEmpty {
+            let bezier = UIBezierPath()
+            bezier.move(to: committedFreeLassoPolygon[0])
+            for pt in committedFreeLassoPolygon.dropFirst() {
+                bezier.addLine(to: pt)
+            }
+            bezier.close()
+            if bezier.contains(point) {
+                return true
+            }
+        }
+        if let rect = selectionBounds, rect.insetBy(dx: -12, dy: -12).contains(point) {
+            return true
+        }
+        return false
+    }
+    
     override func draw(_ rect: CGRect) {
         guard let ctx = UIGraphicsGetCurrentContext() else { return }
         
@@ -154,7 +177,7 @@ final class LassoSelectionOverlayView: UIView {
             }
         }
         
-        // 2. Draw ONLY the active selection mode marquee (Square OR Free, never both)
+        // 2. Draw ONLY the active in-progress selection marquee (Square OR Free, never both)
         if lassoMode == .square, let marquee = activeSquareRect {
             ctx.saveGState()
             ctx.setFillColor(accentBlue.withAlphaComponent(0.08).cgColor)
@@ -180,8 +203,25 @@ final class LassoSelectionOverlayView: UIView {
             ctx.restoreGState()
         }
         
-        // 3. Draw committed selection bounding box & visual cues
-        if let selRect = selectionBounds {
+        // 3. Draw committed selection outline:
+        //    - If in Free Lasso mode and `committedFreeLassoPolygon` is non-empty, draw the exact freehand shape!
+        //    - If in Square Lasso mode (or rectangular selection), draw the rectangle + 4 corner resize handles.
+        if !committedFreeLassoPolygon.isEmpty && lassoMode == .free {
+            ctx.saveGState()
+            let path = UIBezierPath()
+            path.move(to: committedFreeLassoPolygon[0])
+            for pt in committedFreeLassoPolygon.dropFirst() {
+                path.addLine(to: pt)
+            }
+            path.close()
+            accentBlue.withAlphaComponent(0.06).setFill()
+            path.fill()
+            accentBlue.setStroke()
+            path.lineWidth = 1.85
+            path.setLineDash([6, 4], count: 2, phase: 0)
+            path.stroke()
+            ctx.restoreGState()
+        } else if let selRect = selectionBounds {
             ctx.saveGState()
             ctx.setFillColor(accentBlue.withAlphaComponent(0.06).cgColor)
             ctx.fill(selRect)
@@ -219,14 +259,26 @@ final class LassoSelectionOverlayView: UIView {
 }
 
 /// Subclass of PKCanvasView that routes undo/redo actions to a shared document UndoManager,
-/// integrates real-time Hold-to-Snap 2D shape recognition, and provides Apple-Pencil-only Free & Square Lasso
-/// selection (with two-finger pinch-to-resize and Apple Pencil corner-handle dragging) while leaving
-/// 1-finger touches exclusively for page scrolling.
+/// integrates real-time Hold-to-Snap 2D shape recognition, and provides Notability-style Apple-Pencil-only
+/// Free & Square Lasso selection using UIKit's built-in `UIEditMenuInteraction` callout menu.
 final class FixedCanvasView: PKCanvasView {
+    /// Shared in-app clipboard for Lasso Copy/Cut/Paste so it never triggers iOS Universal Clipboard prompts.
+    /// Also stores the copied freehand polygon (if copied from a Free Lasso selection) so pasting preserves
+    /// the exact selection shape shifted to the new paste location!
+    private static var copiedStrokesClipboard: [PKStroke] = []
+    private static var copiedFreeLassoPolygonClipboard: [CGPoint] = []
+    
+    private static let selectionMenuIdentifier: NSString = "ExamPad.LassoSelectionMenu"
+    private static let pasteOnlyMenuIdentifier: NSString = "ExamPad.LassoPasteOnlyMenu"
+    
     weak var customUndoManager: UndoManager?
     
     override var undoManager: UndoManager? {
         return customUndoManager ?? super.undoManager
+    }
+    
+    override var canBecomeFirstResponder: Bool {
+        return true
     }
     
     var lassoMode: LassoMode = .free {
@@ -260,8 +312,10 @@ final class FixedCanvasView: PKCanvasView {
     
     var onShapeSnapped: ((PKDrawing) -> Void)?
     
-    // MARK: - Custom Lasso & Resize State
+    // MARK: - Custom Lasso, System UIEditMenuInteraction & Resize State
     private let lassoOverlay = LassoSelectionOverlayView()
+    private var editMenuInteraction: UIEditMenuInteraction?
+    private var isEditMenuVisible: Bool = false
     private var pinchGesture: UIPinchGestureRecognizer?
     private weak var configuredEnclosingScrollView: UIScrollView?
     
@@ -271,11 +325,19 @@ final class FixedCanvasView: PKCanvasView {
     private var originalSelectedStrokes: [PKStroke] = []
     private var currentTransformedSelectedStrokes: [PKStroke] = []
     private var initialSelectionBounds: CGRect = .zero
+    private var initialFreeLassoPolygon: [CGPoint] = []
     private var activeCornerDrag: LassoSelectionOverlayView.CornerHandle?
     private var isMovingSelectedStrokes: Bool = false
     private var moveStartPoint: CGPoint = .zero
+    private var pencilTouchDownPoint: CGPoint = .zero
+    private var didMoveSignificantlyDuringLassoTouch: Bool = false
+    private var tappedInsideExistingSelectionOnBegan: Bool = false
+    /// Tracks whether the user had an active selection (or visible Paste pill) when the Apple Pencil touched down,
+    /// so tapping away on empty space *only deselects* on the first tap, and only shows the "Paste" popup on a second tap!
+    private var hadSelectionOrMenuOnTouchBegan: Bool = false
     private var squareDrawStartPoint: CGPoint?
     private var freeLassoPoints: [CGPoint] = []
+    private var pasteTargetPoint: CGPoint = .zero
     private(set) var isTransformingSelection: Bool = false
     
     override func didMoveToWindow() {
@@ -299,17 +361,12 @@ final class FixedCanvasView: PKCanvasView {
         var ancestor: UIView? = superview
         while let current = ancestor {
             if let scrollView = current as? UIScrollView, scrollView !== self {
-                if configuredEnclosingScrollView !== scrollView {
+                if configuredEnclosingScrollView !== scrollView ||
+                   scrollView.panGestureRecognizer.allowedTouchTypes != [NSNumber(value: UITouch.TouchType.direct.rawValue)] {
                     scrollView.panGestureRecognizer.allowedTouchTypes = [
                         NSNumber(value: UITouch.TouchType.direct.rawValue)
                     ]
                     configuredEnclosingScrollView = scrollView
-                } else if scrollView.panGestureRecognizer.allowedTouchTypes != [
-                    NSNumber(value: UITouch.TouchType.direct.rawValue)
-                ] {
-                    scrollView.panGestureRecognizer.allowedTouchTypes = [
-                        NSNumber(value: UITouch.TouchType.direct.rawValue)
-                    ]
                 }
                 break
             }
@@ -339,7 +396,6 @@ final class FixedCanvasView: PKCanvasView {
         touchObserverGesture = observer
         
         // Two-finger pinch gesture to scale selected strokes in both Free and Square Lasso modes.
-        // Single-finger touches are never intercepted so 1-finger scrolling works anywhere on the page.
         let pinch = UIPinchGestureRecognizer(target: self, action: #selector(handleSelectionPinch(_:)))
         pinch.cancelsTouchesInView = false
         pinch.delaysTouchesBegan = false
@@ -347,12 +403,14 @@ final class FixedCanvasView: PKCanvasView {
         pinch.delegate = self
         addGestureRecognizer(pinch)
         pinchGesture = pinch
+        
+        // Install UIKit's built-in UIEditMenuInteraction for the system Cut/Copy/Duplicate/Delete/Paste callout menu
+        let menuInteraction = UIEditMenuInteraction(delegate: self)
+        addInteraction(menuInteraction)
+        editMenuInteraction = menuInteraction
     }
     
     func syncLassoGestureMode() {
-        // When Lasso tool is active, disable `drawingGestureRecognizer` so PencilKit's internal
-        // `PKSelectionGestureView` never runs in parallel, while our `PencilTouchObserverGestureRecognizer`
-        // handles all Apple Pencil lasso drawing, moving, and corner resizing.
         if isLassoToolSelected {
             drawingGestureRecognizer.isEnabled = false
         } else {
@@ -367,13 +425,192 @@ final class FixedCanvasView: PKCanvasView {
         activeCornerDrag = nil
         isMovingSelectedStrokes = false
         isTransformingSelection = false
+        tappedInsideExistingSelectionOnBegan = false
         squareDrawStartPoint = nil
         freeLassoPoints.removeAll()
+        initialFreeLassoPolygon.removeAll()
         lassoOverlay.activeLassoPoints = []
         lassoOverlay.activeSquareRect = nil
+        lassoOverlay.committedFreeLassoPolygon = []
         lassoOverlay.selectionBounds = nil
         lassoOverlay.showCornerHandles = false
         lassoOverlay.previewStrokes = []
+        dismissSystemEditMenu()
+    }
+    
+    // MARK: - Built-In UIKit UIEditMenuInteraction (Cut / Copy / Duplicate / Delete / Paste)
+    
+    private func presentSystemSelectionMenu() {
+        guard !selectedStrokeIndices.isEmpty, let selBounds = lassoOverlay.selectionBounds else {
+            dismissSystemEditMenu()
+            return
+        }
+        _ = becomeFirstResponder()
+        let topAnchor = CGPoint(x: selBounds.midX, y: max(selBounds.minY, 8))
+        let config = UIEditMenuConfiguration(
+            identifier: Self.selectionMenuIdentifier,
+            sourcePoint: topAnchor
+        )
+        config.preferredArrowDirection = . automatic
+        isEditMenuVisible = true
+        editMenuInteraction?.presentEditMenu(with: config)
+    }
+    
+    private func presentSystemPasteOnlyMenu(at point: CGPoint) {
+        guard !Self.copiedStrokesClipboard.isEmpty else {
+            dismissSystemEditMenu()
+            return
+        }
+        pasteTargetPoint = point
+        _ = becomeFirstResponder()
+        let config = UIEditMenuConfiguration(
+            identifier: Self.pasteOnlyMenuIdentifier,
+            sourcePoint: point
+        )
+        config.preferredArrowDirection = .automatic
+        isEditMenuVisible = true
+        editMenuInteraction?.presentEditMenu(with: config)
+    }
+    
+    private func dismissSystemEditMenu() {
+        if isEditMenuVisible {
+            editMenuInteraction?.dismissMenu()
+            isEditMenuVisible = false
+        }
+    }
+    
+    override func canPerformAction(_ action: Selector, withSender sender: Any?) -> Bool {
+        if isLassoToolSelected {
+            if !selectedStrokeIndices.isEmpty {
+                if action == #selector(cut(_:)) ||
+                   action == #selector(copy(_:)) ||
+                   action == #selector(delete(_:)) {
+                    return true
+                }
+            } else if !Self.copiedStrokesClipboard.isEmpty {
+                if action == #selector(paste(_:)) {
+                    return true
+                }
+            }
+            return false
+        }
+        return super.canPerformAction(action, withSender: sender)
+    }
+    
+    override func cut(_ sender: Any?) {
+        copySelectedStrokes()
+        deleteSelectedStrokes(actionName: "Cut Selection")
+    }
+    
+    override func copy(_ sender: Any?) {
+        copySelectedStrokes()
+        dismissSystemEditMenu()
+    }
+    
+    override func paste(_ sender: Any?) {
+        pasteCopiedStrokes()
+    }
+    
+    override func delete(_ sender: Any?) {
+        deleteSelectedStrokes(actionName: "Delete Selection")
+    }
+    
+    private func copySelectedStrokes() {
+        let strokes = selectedStrokeIndices.compactMap { idx -> PKStroke? in
+            guard idx < drawing.strokes.count else { return nil }
+            return drawing.strokes[idx]
+        }
+        guard !strokes.isEmpty else { return }
+        Self.copiedStrokesClipboard = strokes
+        Self.copiedFreeLassoPolygonClipboard = lassoOverlay.committedFreeLassoPolygon
+    }
+    
+    private func deleteSelectedStrokes(actionName: String) {
+        guard !selectedStrokeIndices.isEmpty else { return }
+        let oldDrawing = drawing
+        let selectedSet = Set(selectedStrokeIndices)
+        let remaining = oldDrawing.strokes.enumerated().compactMap { i, s in
+            selectedSet.contains(i) ? nil : s
+        }
+        let newDrawing = PKDrawing(strokes: remaining)
+        clearLassoSelection()
+        applyDrawingWithUndo(from: oldDrawing, to: newDrawing, actionName: actionName)
+    }
+    
+    private func duplicateSelectedStrokes() {
+        let strokes = selectedStrokeIndices.compactMap { idx -> PKStroke? in
+            guard idx < drawing.strokes.count else { return nil }
+            return drawing.strokes[idx]
+        }
+        guard !strokes.isEmpty else { return }
+        let oldDrawing = drawing
+        let dx: CGFloat = 24
+        let dy: CGFloat = 24
+        let offsetTransform = CGAffineTransform(translationX: dx, y: dy)
+        let duplicated = PKDrawing(strokes: strokes).transformed(using: offsetTransform).strokes
+        
+        var allStrokes = oldDrawing.strokes
+        let startIdx = allStrokes.count
+        allStrokes.append(contentsOf: duplicated)
+        let newIndices = Array(startIdx..<(startIdx + duplicated.count))
+        let newDrawing = PKDrawing(strokes: allStrokes)
+        
+        let shiftedPolygon: [CGPoint]?
+        if lassoMode == .free {
+            if !lassoOverlay.committedFreeLassoPolygon.isEmpty {
+                shiftedPolygon = lassoOverlay.committedFreeLassoPolygon.map {
+                    CGPoint(x: $0.x + dx, y: $0.y + dy)
+                }
+            } else {
+                shiftedPolygon = Self.generateOrganicFreeLassoContour(for: duplicated)
+            }
+        } else {
+            shiftedPolygon = nil
+        }
+        
+        applyDrawingWithUndo(from: oldDrawing, to: newDrawing, actionName: "Duplicate Selection")
+        updateSelectionState(indices: newIndices, customFreePolygon: shiftedPolygon)
+        presentSystemSelectionMenu()
+    }
+    
+    private func pasteCopiedStrokes() {
+        let clipboard = Self.copiedStrokesClipboard
+        guard !clipboard.isEmpty else { return }
+        let oldDrawing = drawing
+        let clipDrawing = PKDrawing(strokes: clipboard)
+        let clipBounds = clipDrawing.bounds
+        let targetCenter = selectedStrokeIndices.isEmpty
+            ? pasteTargetPoint
+            : CGPoint(x: clipBounds.midX + 24, y: clipBounds.midY + 24)
+        let dx = targetCenter.x - clipBounds.midX
+        let dy = targetCenter.y - clipBounds.midY
+        let translation = CGAffineTransform(translationX: dx, y: dy)
+        let pastedStrokes = clipDrawing.transformed(using: translation).strokes
+        
+        var allStrokes = oldDrawing.strokes
+        let startIdx = allStrokes.count
+        allStrokes.append(contentsOf: pastedStrokes)
+        let newIndices = Array(startIdx..<(startIdx + pastedStrokes.count))
+        let newDrawing = PKDrawing(strokes: allStrokes)
+        
+        let contour: [CGPoint]?
+        if lassoMode == .free {
+            if !Self.copiedFreeLassoPolygonClipboard.isEmpty {
+                // Shift the copied freehand polygon by the exact same (dx, dy) translation!
+                contour = Self.copiedFreeLassoPolygonClipboard.map {
+                    $0.applying(translation)
+                }
+            } else {
+                // Or generate an organic contour using the transformed points of the pasted strokes
+                contour = Self.generateOrganicFreeLassoContour(for: pastedStrokes)
+            }
+        } else {
+            contour = nil
+        }
+        
+        applyDrawingWithUndo(from: oldDrawing, to: newDrawing, actionName: "Paste Strokes")
+        updateSelectionState(indices: newIndices, customFreePolygon: contour)
+        presentSystemSelectionMenu()
     }
     
     // MARK: - Pencil Touch Routing (Hold-to-Snap & Custom Lasso)
@@ -469,12 +706,14 @@ final class FixedCanvasView: PKCanvasView {
         }
     }
     
-    // MARK: - Apple-Pencil-Only Lasso Selection, Move, & Corner Resize Logic
+    // MARK: - Notability-Style Apple-Pencil-Only Lasso Selection, Tap-to-Select, Tap-Away Deselect, Move & Resize
     
     private func beginInteractiveSelectionTransform(currentBounds: CGRect) {
         preTransformDrawing = drawing
         initialSelectionBounds = currentBounds
+        initialFreeLassoPolygon = lassoOverlay.committedFreeLassoPolygon
         isTransformingSelection = true
+        dismissSystemEditMenu()
         
         let selectedSet = Set(selectedStrokeIndices)
         var unselected: [PKStroke] = []
@@ -497,6 +736,14 @@ final class FixedCanvasView: PKCanvasView {
     }
     
     private func handleLassoPencilBegan(at point: CGPoint) {
+        pencilTouchDownPoint = point
+        didMoveSignificantlyDuringLassoTouch = false
+        tappedInsideExistingSelectionOnBegan = false
+        
+        // Record whether the user currently had an active selection or open Paste popup BEFORE this touch began.
+        // If they did, and this touch turns out to be a tap on empty canvas, we ONLY deselect / dismiss the menu!
+        hadSelectionOrMenuOnTouchBegan = (!selectedStrokeIndices.isEmpty || isEditMenuVisible)
+        
         // 1. Check if Apple Pencil touched one of the 4 corner resize handles (Square Lasso mode)
         if let corner = lassoOverlay.hitTestCorner(at: point),
            !selectedStrokeIndices.isEmpty,
@@ -507,18 +754,19 @@ final class FixedCanvasView: PKCanvasView {
             return
         }
         
-        // 2. Check if Apple Pencil touched inside existing selection bounds to move selected strokes
-        if let currentBounds = lassoOverlay.selectionBounds,
-           !selectedStrokeIndices.isEmpty,
-           currentBounds.insetBy(dx: -12, dy: -12).contains(point) {
+        // 2. Check if Apple Pencil touched inside existing selection (freehand polygon or bounds) to move or toggle menu
+        if !selectedStrokeIndices.isEmpty,
+           let currentBounds = lassoOverlay.selectionBounds,
+           lassoOverlay.containsSelectionPoint(point) {
             activeCornerDrag = nil
             isMovingSelectedStrokes = true
+            tappedInsideExistingSelectionOnBegan = true
             moveStartPoint = point
             beginInteractiveSelectionTransform(currentBounds: currentBounds)
             return
         }
         
-        // 3. Otherwise start a new selection with Apple Pencil using ONLY the selected LassoMode (Square OR Free)
+        // 3. Otherwise clear any active selection/menu and prepare for either a new drag-lasso or a tap
         clearLassoSelection()
         if lassoMode == .square {
             squareDrawStartPoint = point
@@ -533,6 +781,10 @@ final class FixedCanvasView: PKCanvasView {
     }
     
     private func handleLassoPencilMoved(to point: CGPoint) {
+        if hypot(point.x - pencilTouchDownPoint.x, point.y - pencilTouchDownPoint.y) > 4.5 {
+            didMoveSignificantlyDuringLassoTouch = true
+        }
+        
         if let corner = activeCornerDrag {
             applyCornerResize(corner: corner, to: point)
             return
@@ -544,6 +796,11 @@ final class FixedCanvasView: PKCanvasView {
             let translation = CGAffineTransform(translationX: dx, y: dy)
             updateLiveTransformPreview(translation)
             lassoOverlay.selectionBounds = initialSelectionBounds.offsetBy(dx: dx, dy: dy)
+            if !initialFreeLassoPolygon.isEmpty {
+                lassoOverlay.committedFreeLassoPolygon = initialFreeLassoPolygon.map {
+                    CGPoint(x: $0.x + dx, y: $0.y + dy)
+                }
+            }
             return
         }
         
@@ -563,11 +820,47 @@ final class FixedCanvasView: PKCanvasView {
     
     private func handleLassoPencilEnded(at point: CGPoint) {
         if activeCornerDrag != nil || isMovingSelectedStrokes {
-            finishInteractiveSelectionTransform()
+            let wasTapOnlyInsideSelection = tappedInsideExistingSelectionOnBegan && !didMoveSignificantlyDuringLassoTouch
+            finishInteractiveSelectionTransform(wasZeroMovementTap: wasTapOnlyInsideSelection)
             activeCornerDrag = nil
             isMovingSelectedStrokes = false
+            tappedInsideExistingSelectionOnBegan = false
+            presentSystemSelectionMenu()
             return
         }
+        
+        // Check if the user simply tapped with the Apple Pencil (movement <= 7pt)
+        let totalDisplacement = hypot(point.x - pencilTouchDownPoint.x, point.y - pencilTouchDownPoint.y)
+        if !didMoveSignificantlyDuringLassoTouch && totalDisplacement <= 7.0 {
+            lassoOverlay.activeSquareRect = nil
+            lassoOverlay.activeLassoPoints = []
+            squareDrawStartPoint = nil
+            freeLassoPoints.removeAll()
+            
+            // Hit-test if the Apple Pencil tapped directly on a stroke
+            if let hitIndex = hitTestStroke(at: point) {
+                let tappedStroke = drawing.strokes[hitIndex]
+                let freeContour = lassoMode == .free
+                    ? Self.generateOrganicFreeLassoContour(for: [tappedStroke])
+                    : nil
+                updateSelectionState(indices: [hitIndex], customFreePolygon: freeContour)
+                presentSystemSelectionMenu()
+            } else {
+                // Tapped on empty canvas (no strokes at this location):
+                // - If we had an active selection (or open Paste popup) when this tap started,
+                //   this 1st tap ONLY deselects / dismisses (just like Notability).
+                // - Only on a 2nd tap on empty canvas (when nothing was selected and no menu was open)
+                //   do we show the built-in system "Paste" popup!
+                clearLassoSelection()
+                if !hadSelectionOrMenuOnTouchBegan && !Self.copiedStrokesClipboard.isEmpty {
+                    presentSystemPasteOnlyMenu(at: point)
+                }
+            }
+            hadSelectionOrMenuOnTouchBegan = false
+            return
+        }
+        
+        hadSelectionOrMenuOnTouchBegan = false
         
         if lassoMode == .square, let rect = lassoOverlay.activeSquareRect {
             lassoOverlay.activeSquareRect = nil
@@ -581,6 +874,83 @@ final class FixedCanvasView: PKCanvasView {
             guard pts.count >= 3 else { return }
             selectStrokesInPolygon(pts)
         }
+    }
+    
+    /// Helper to get the actual canvas-space coordinate of a `PKStrokePoint` (applying `stroke.transform`).
+    private static func canvasLocation(of point: PKStrokePoint, in stroke: PKStroke) -> CGPoint {
+        return point.location.applying(stroke.transform)
+    }
+    
+    /// Finds the topmost stroke within `18pt` of the tapped point, accounting for `stroke.transform`.
+    private func hitTestStroke(at point: CGPoint, tolerance: CGFloat = 18.0) -> Int? {
+        var bestIndex: Int?
+        var bestDistance: CGFloat = tolerance
+        
+        for (idx, stroke) in drawing.strokes.enumerated().reversed() {
+            let expandedBounds = stroke.renderBounds.insetBy(dx: -tolerance, dy: -tolerance)
+            guard expandedBounds.contains(point) else { continue }
+            
+            for sample in stroke.path.interpolatedPoints(by: .distance(6)) {
+                let sampleLoc = Self.canvasLocation(of: sample, in: stroke)
+                let dist = hypot(sampleLoc.x - point.x, sampleLoc.y - point.y)
+                if dist <= bestDistance {
+                    bestDistance = dist
+                    bestIndex = idx
+                }
+            }
+            if bestIndex != nil {
+                return bestIndex
+            }
+        }
+        return bestIndex
+    }
+    
+    /// Generates a smooth, rounded organic lasso contour around strokes in their actual transformed canvas coordinates!
+    private static func generateOrganicFreeLassoContour(for strokes: [PKStroke], padding: CGFloat = 12.0) -> [CGPoint] {
+        var allPoints: [CGPoint] = []
+        for stroke in strokes {
+            for pt in stroke.path.interpolatedPoints(by: .distance(10)) {
+                // Apply `stroke.transform` so pasted/moved/duplicated strokes generate their
+                // contour at their NEW canvas position rather than their original pre-transform path coordinates!
+                let loc = canvasLocation(of: pt, in: stroke)
+                for angleIdx in 0..<8 {
+                    let angle = CGFloat(angleIdx) * (.pi / 4.0)
+                    allPoints.append(CGPoint(
+                        x: loc.x + cos(angle) * padding,
+                        y: loc.y + sin(angle) * padding
+                    ))
+                }
+            }
+        }
+        return computeConvexHull(of: allPoints)
+    }
+    
+    /// Monotone chain convex hull algorithm to wrap a smooth freehand contour around tapped/pasted strokes.
+    private static func computeConvexHull(of points: [CGPoint]) -> [CGPoint] {
+        guard points.count >= 3 else { return points }
+        let sorted = points.sorted {
+            $0.x == $1.x ? $0.y < $1.y : $0.x < $1.x
+        }
+        func cross(_ o: CGPoint, _ a: CGPoint, _ b: CGPoint) -> CGFloat {
+            (a.x - o.x) * (b.y - o.y) - (a.y - o.y) * (b.x - o.x)
+        }
+        var lower: [CGPoint] = []
+        for p in sorted {
+            while lower.count >= 2 && cross(lower[lower.count - 2], lower[lower.count - 1], p) <= 0 {
+                lower.removeLast()
+            }
+            lower.append(p)
+        }
+        var upper: [CGPoint] = []
+        for p in sorted.reversed() {
+            while upper.count >= 2 && cross(upper[upper.count - 2], upper[upper.count - 1], p) <= 0 {
+                upper.removeLast()
+            }
+            upper.append(p)
+        }
+        lower.removeLast()
+        upper.removeLast()
+        return lower + upper
     }
     
     @objc private func handleSelectionPinch(_ gesture: UIPinchGestureRecognizer) {
@@ -599,8 +969,14 @@ final class FixedCanvasView: PKCanvasView {
                 .translatedBy(x: -center.x, y: -center.y)
             updateLiveTransformPreview(transform)
             lassoOverlay.selectionBounds = initialSelectionBounds.applying(transform)
+            if !initialFreeLassoPolygon.isEmpty {
+                lassoOverlay.committedFreeLassoPolygon = initialFreeLassoPolygon.map {
+                    $0.applying(transform)
+                }
+            }
         case .ended, .cancelled:
             finishInteractiveSelectionTransform()
+            presentSystemSelectionMenu()
         default:
             break
         }
@@ -653,10 +1029,17 @@ final class FixedCanvasView: PKCanvasView {
         lassoOverlay.previewStrokes = currentTransformedSelectedStrokes
     }
     
-    private func finishInteractiveSelectionTransform() {
+    private func finishInteractiveSelectionTransform(wasZeroMovementTap: Bool = false) {
         guard isTransformingSelection else { return }
         isTransformingSelection = false
         lassoOverlay.previewStrokes = []
+        
+        if wasZeroMovementTap {
+            drawing = preTransformDrawing
+            return
+        }
+        
+        let preservedFreePolygon = lassoOverlay.committedFreeLassoPolygon
         
         // Reconstruct full drawing with the transformed strokes in their original z-order indices
         var allStrokes = preTransformDrawing.strokes
@@ -671,7 +1054,10 @@ final class FixedCanvasView: PKCanvasView {
         
         let finalDrawing = PKDrawing(strokes: allStrokes)
         applyDrawingWithUndo(from: preTransformDrawing, to: finalDrawing, actionName: "Transform Selection")
-        updateSelectionState(indices: selectedStrokeIndices)
+        updateSelectionState(
+            indices: selectedStrokeIndices,
+            customFreePolygon: preservedFreePolygon.isEmpty ? nil : preservedFreePolygon
+        )
     }
     
     private func selectStrokesInRect(_ rect: CGRect) {
@@ -681,7 +1067,10 @@ final class FixedCanvasView: PKCanvasView {
                 matched.append(idx)
             }
         }
-        updateSelectionState(indices: matched)
+        updateSelectionState(indices: matched, customFreePolygon: nil)
+        if !matched.isEmpty {
+            presentSystemSelectionMenu()
+        }
     }
     
     private func selectStrokesInPolygon(_ polygon: [CGPoint]) {
@@ -701,16 +1090,21 @@ final class FixedCanvasView: PKCanvasView {
                 continue
             }
             for pt in stroke.path.interpolatedPoints(by: .distance(12)) {
-                if bezier.contains(pt.location) {
+                let sampleLoc = Self.canvasLocation(of: pt, in: stroke)
+                if bezier.contains(sampleLoc) {
                     matched.append(idx)
                     break
                 }
             }
         }
-        updateSelectionState(indices: matched)
+        // Keep the exact freehand loop drawn by the user!
+        updateSelectionState(indices: matched, customFreePolygon: polygon)
+        if !matched.isEmpty {
+            presentSystemSelectionMenu()
+        }
     }
     
-    private func updateSelectionState(indices: [Int]) {
+    private func updateSelectionState(indices: [Int], customFreePolygon: [CGPoint]? = nil) {
         selectedStrokeIndices = indices
         guard !indices.isEmpty else {
             clearLassoSelection()
@@ -720,9 +1114,20 @@ final class FixedCanvasView: PKCanvasView {
         for idx in indices where idx < drawing.strokes.count {
             unionRect = unionRect.union(drawing.strokes[idx].renderBounds)
         }
+        if let freePoly = customFreePolygon, !freePoly.isEmpty {
+            for pt in freePoly {
+                unionRect = unionRect.union(CGRect(x: pt.x, y: pt.y, width: 1, height: 1))
+            }
+        }
         if !unionRect.isNull {
             lassoOverlay.selectionBounds = unionRect.insetBy(dx: -8, dy: -8)
-            lassoOverlay.showCornerHandles = (lassoMode == .square)
+            if lassoMode == .free {
+                lassoOverlay.committedFreeLassoPolygon = customFreePolygon ?? []
+                lassoOverlay.showCornerHandles = false
+            } else {
+                lassoOverlay.committedFreeLassoPolygon = []
+                lassoOverlay.showCornerHandles = true
+            }
         }
     }
     
@@ -792,6 +1197,56 @@ final class FixedCanvasView: PKCanvasView {
             target.applyDrawingWithUndo(from: newDrawing, to: oldDrawing, actionName: actionName)
         }
         undoManager?.setActionName(actionName)
+    }
+}
+
+extension FixedCanvasView: UIEditMenuInteractionDelegate {
+    func editMenuInteraction(
+        _ interaction: UIEditMenuInteraction,
+        menuFor configuration: UIEditMenuConfiguration,
+        suggestedActions: [UIMenuElement]
+    ) -> UIMenu? {
+        if let id = configuration.identifier as? NSString, id == Self.selectionMenuIdentifier {
+            let cutAction = UIAction(title: "Cut") { [weak self] _ in
+                self?.cut(nil)
+            }
+            let copyAction = UIAction(title: "Copy") { [weak self] _ in
+                self?.copy(nil)
+            }
+            let duplicateAction = UIAction(title: "Duplicate") { [weak self] _ in
+                self?.duplicateSelectedStrokes()
+            }
+            let deleteAction = UIAction(title: "Delete", attributes: .destructive) { [weak self] _ in
+                self?.delete(nil)
+            }
+            return UIMenu(children: [cutAction, copyAction, duplicateAction, deleteAction])
+        } else if let id = configuration.identifier as? NSString, id == Self.pasteOnlyMenuIdentifier {
+            let pasteAction = UIAction(title: "Paste") { [weak self] _ in
+                self?.paste(nil)
+            }
+            return UIMenu(children: [pasteAction])
+        }
+        return nil
+    }
+    
+    func editMenuInteraction(
+        _ interaction: UIEditMenuInteraction,
+        targetRectFor configuration: UIEditMenuConfiguration
+    ) -> CGRect {
+        if let id = configuration.identifier as? NSString,
+           id == Self.selectionMenuIdentifier,
+           let selBounds = lassoOverlay.selectionBounds {
+            return selBounds
+        }
+        return CGRect(x: pasteTargetPoint.x - 2, y: pasteTargetPoint.y - 2, width: 4, height: 4)
+    }
+    
+    func editMenuInteraction(
+        _ interaction: UIEditMenuInteraction,
+        willDismissMenuFor configuration: UIEditMenuConfiguration,
+        animator: any UIEditMenuInteractionAnimating
+    ) {
+        isEditMenuVisible = false
     }
 }
 

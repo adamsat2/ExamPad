@@ -8,25 +8,52 @@ import Combine
 import AutomaticAssessmentConfiguration
 import UIKit
 import UserNotifications
+import ObjectiveC
 
-/// Subclass of UIViewController that swizzles or overrides `preferredScreenEdgesDeferringSystemGestures`
-/// on the root hosting controller when `ExamLockdownState.isLocked` is true.
+/// Swizzles:
+/// 1. `UIViewController.preferredScreenEdgesDeferringSystemGestures` to return `.all` during an active exam.
+/// 2. `UISceneSizeRestrictions.minimumSize` and `maximumSize` so that the app always launches full-screen
+///    and cannot be resized via corner-dragging in iPadOS Windowed / Stage Manager mode.
 enum ExamLockdownState {
     @MainActor static var isLocked: Bool = false
+    @MainActor static var alwaysEnforceFullScreen: Bool = true
+    @MainActor static var lockedFullScreenSize: CGSize = CGSize(width: 1366, height: 1024)
     
     @MainActor
-    static func installEdgeDeferralSupport() {
+    static func installLockdownRuntimeSupport() {
         _ = swizzleOnce
     }
     
     private static let swizzleOnce: Void = {
-        let cls: AnyClass = UIViewController.self
-        let originalSelector = #selector(getter: UIViewController.preferredScreenEdgesDeferringSystemGestures)
-        let swizzledSelector = #selector(UIViewController.exampad_preferredScreenEdgesDeferringSystemGestures)
+        // 1. Swizzle preferredScreenEdgesDeferringSystemGestures on UIViewController
+        let vcClass: AnyClass = UIViewController.self
+        let origEdgeSel = #selector(getter: UIViewController.preferredScreenEdgesDeferringSystemGestures)
+        let swizzledEdgeSel = #selector(UIViewController.exampad_preferredScreenEdgesDeferringSystemGestures)
+        if let origMethod = class_getInstanceMethod(vcClass, origEdgeSel),
+           let swizzledMethod = class_getInstanceMethod(vcClass, swizzledEdgeSel) {
+            method_exchangeImplementations(origMethod, swizzledMethod)
+        }
         
-        if let originalMethod = class_getInstanceMethod(cls, originalSelector),
-           let swizzledMethod = class_getInstanceMethod(cls, swizzledSelector) {
-            method_exchangeImplementations(originalMethod, swizzledMethod)
+        // 2. Swizzle UISceneSizeRestrictions.setMinimumSize: and setMaximumSize: so SwiftUI's
+        //    UIHostingController cannot reset minimumSize/maximumSize to smaller values!
+        var targetClasses: [AnyClass] = [UISceneSizeRestrictions.self]
+        if let implClass = NSClassFromString("_UISceneSizeRestrictionsImpl") {
+            targetClasses.append(implClass)
+        }
+        for cls in targetClasses {
+            let origMinSel = #selector(setter: UISceneSizeRestrictions.minimumSize)
+            let swizMinSel = #selector(UISceneSizeRestrictions.exampad_setMinimumSize(_:))
+            if let m1 = class_getInstanceMethod(cls, origMinSel),
+               let m2 = class_getInstanceMethod(cls, swizMinSel) {
+                method_exchangeImplementations(m1, m2)
+            }
+            
+            let origMaxSel = #selector(setter: UISceneSizeRestrictions.maximumSize)
+            let swizMaxSel = #selector(UISceneSizeRestrictions.exampad_setMaximumSize(_:))
+            if let m1 = class_getInstanceMethod(cls, origMaxSel),
+               let m2 = class_getInstanceMethod(cls, swizMaxSel) {
+                method_exchangeImplementations(m1, m2)
+            }
         }
     }()
 }
@@ -43,7 +70,35 @@ extension UIViewController {
     }
 }
 
-/// Manages device locking, window resize blocking, first-swipe edge deferral, tamper/exit detection,
+extension UISceneSizeRestrictions {
+    @objc func exampad_setMinimumSize(_ size: CGSize) {
+        if Thread.isMainThread {
+            let (enforce, lockedSize) = MainActor.assumeIsolated {
+                (ExamLockdownState.alwaysEnforceFullScreen || ExamLockdownState.isLocked, ExamLockdownState.lockedFullScreenSize)
+            }
+            if enforce {
+                exampad_setMinimumSize(lockedSize)
+                return
+            }
+        }
+        exampad_setMinimumSize(size)
+    }
+    
+    @objc func exampad_setMaximumSize(_ size: CGSize) {
+        if Thread.isMainThread {
+            let (enforce, lockedSize) = MainActor.assumeIsolated {
+                (ExamLockdownState.alwaysEnforceFullScreen || ExamLockdownState.isLocked, ExamLockdownState.lockedFullScreenSize)
+            }
+            if enforce {
+                exampad_setMaximumSize(lockedSize)
+                return
+            }
+        }
+        exampad_setMaximumSize(size)
+    }
+}
+
+/// Manages device locking, full-screen window enforcement, first-swipe edge deferral, tamper/exit detection,
 /// and notification suppression during an exam.
 @MainActor
 final class AssessmentManager: NSObject, ObservableObject {
@@ -58,11 +113,19 @@ final class AssessmentManager: NSObject, ObservableObject {
     private var willResignActiveObserver: NSObjectProtocol?
     private var didEnterBackgroundObserver: NSObjectProtocol?
     private var didBecomeActiveObserver: NSObjectProtocol?
+    private var geometryKVOObservations: [NSKeyValueObservation] = []
     
     override init() {
         super.init()
-        ExamLockdownState.installEdgeDeferralSupport()
+        ExamLockdownState.installLockdownRuntimeSupport()
         UNUserNotificationCenter.current().delegate = self
+        enforceFullScreenAtLaunch()
+    }
+    
+    /// Ensures the app starts in full-screen and disables window resizing from the moment it opens.
+    func enforceFullScreenAtLaunch() {
+        ExamLockdownState.alwaysEnforceFullScreen = true
+        lockWindowToFullScreen()
     }
     
     /// Clears only local iPad clipboard items without triggering Universal Clipboard ("Paste from MacBook") prompts.
@@ -75,6 +138,7 @@ final class AssessmentManager: NSObject, ObservableObject {
     func beginExamLockdown() {
         isExamLocked = true
         ExamLockdownState.isLocked = true
+        ExamLockdownState.alwaysEnforceFullScreen = true
         tamperViolationCount = 0
         showTamperViolationAlert = false
         isAppInactiveDuringExam = false
@@ -110,8 +174,9 @@ final class AssessmentManager: NSObject, ObservableObject {
         }
     }
     
-    /// Releases the device from Assessment Mode, restores window resizability, stops tamper monitoring,
+    /// Releases the device from Assessment Mode, stops tamper monitoring,
     /// and unblocks notifications once the exam has been submitted AND the user returns to the home screen.
+    /// Keeps the app window locked at full-screen as requested.
     func endExamLockdown() {
         isExamLocked = false
         ExamLockdownState.isLocked = false
@@ -131,8 +196,8 @@ final class AssessmentManager: NSObject, ObservableObject {
         // 3. Release Guided Access / Single App Mode if active
         UIAccessibility.requestGuidedAccessSession(enabled: false) { _ in }
         
-        // 4. Restore window resizability & normal edge gestures
-        unlockWindowSize()
+        // 4. Keep full-screen window size enforced while restoring normal edge gestures
+        applyFullScreenWindowRestrictions()
         
         // 5. Unblock notifications
         unblockNotifications()
@@ -203,7 +268,7 @@ final class AssessmentManager: NSObject, ObservableObject {
         }
     }
     
-    // MARK: - Window Locking & First-Swipe Edge Gesture Deferral
+    // MARK: - Window Locking (Stage Manager / Windowed Mode) & First-Swipe Edge Gesture Deferral
     
     private func lockWindowToFullScreen() {
         applyFullScreenWindowRestrictions()
@@ -215,10 +280,25 @@ final class AssessmentManager: NSObject, ObservableObject {
                 queue: .main
             ) { [weak self] _ in
                 MainActor.assumeIsolated {
-                    guard let self = self, self.isExamLocked else { return }
-                    self.applyFullScreenWindowRestrictions()
+                    self?.applyFullScreenWindowRestrictions()
                 }
             }
+        }
+        
+        // Observe `effectiveGeometry` on every UIWindowScene so if the user attempts to drag a window corner
+        // in iPadOS Windowed Mode / Stage Manager, we immediately re-assert full-screen size restrictions.
+        geometryKVOObservations.removeAll()
+        for scene in UIApplication.shared.connectedScenes {
+            guard let windowScene = scene as? UIWindowScene else { continue }
+            let obs = windowScene.observe(\.effectiveGeometry, options: [.new]) { scene, _ in
+                Task { @MainActor in
+                    let screenBounds = scene.screen.bounds.size
+                    ExamLockdownState.lockedFullScreenSize = screenBounds
+                    scene.sizeRestrictions?.minimumSize = screenBounds
+                    scene.sizeRestrictions?.maximumSize = screenBounds
+                }
+            }
+            geometryKVOObservations.append(obs)
         }
     }
     
@@ -226,27 +306,15 @@ final class AssessmentManager: NSObject, ObservableObject {
         for scene in UIApplication.shared.connectedScenes {
             guard let windowScene = scene as? UIWindowScene else { continue }
             let screenBounds = windowScene.screen.bounds.size
+            ExamLockdownState.lockedFullScreenSize = screenBounds
+            
             // Force both minimum and maximum window size to match the full screen dimensions,
-            // disabling corner drag-resizing and compact windowing in Stage Manager.
+            // and prevent SwiftUI's UIHostingController from overwriting them via our swizzled setter.
+            windowScene.sizeRestrictions?.allowsFullScreen = true
             windowScene.sizeRestrictions?.minimumSize = screenBounds
             windowScene.sizeRestrictions?.maximumSize = screenBounds
-            
-            for window in windowScene.windows {
-                updateGestureDeferralRecursively(on: window.rootViewController)
-            }
-        }
-    }
-    
-    private func unlockWindowSize() {
-        if let observer = orientationObserver {
-            NotificationCenter.default.removeObserver(observer)
-            orientationObserver = nil
-        }
-        
-        for scene in UIApplication.shared.connectedScenes {
-            guard let windowScene = scene as? UIWindowScene else { continue }
-            windowScene.sizeRestrictions?.minimumSize = CGSize(width: 320, height: 480)
-            windowScene.sizeRestrictions?.maximumSize = CGSize(width: 10000, height: 10000)
+            windowScene.windowingBehaviors?.isClosable = false
+            windowScene.windowingBehaviors?.isMiniaturizable = false
             
             for window in windowScene.windows {
                 updateGestureDeferralRecursively(on: window.rootViewController)
