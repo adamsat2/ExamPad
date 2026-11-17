@@ -117,16 +117,32 @@ final class ExamFlowViewModel: ObservableObject {
         currentTool is PKLassoTool
     }
     
-    // Simulates the QR scan bypass for current development stage
-    // When QR is integrated, this will decode the payload and transition to .waitingForExam
-    func mockScanAndStart(assessmentManager: AssessmentManager? = nil) {
-        // Cancel any lingering submission timer and ensure a clean exam state
+    func navigateToQRScanner() {
+        currentState = .scanningQR
+    }
+    
+    func returnToStartScreen() {
+        currentState = .start
+    }
+    
+    func startExam(assessmentManager: AssessmentManager? = nil) {
         submitResetWorkItem?.cancel()
         submitResetWorkItem = nil
         submissionSuccess = false
         showSubmitConfirmation = false
-        assessmentManager?.beginExamLockdown()
+        if let assessmentManager = assessmentManager {
+            configureAssessmentCallbacks(assessmentManager: assessmentManager)
+            assessmentManager.beginExamSession()
+        }
         currentState = .activeExam
+    }
+    
+    func configureAssessmentCallbacks(assessmentManager: AssessmentManager) {
+        assessmentManager.onGuidedAccessTurnedOffDuringExam = { [weak self, weak assessmentManager] in
+            guard let self = self, let assessmentManager = assessmentManager else { return }
+            guard self.currentState == .activeExam, !self.submissionSuccess else { return }
+            self.submitExam(assessmentManager: assessmentManager)
+        }
     }
     
     func addGridPage() {
@@ -222,7 +238,7 @@ final class ExamFlowViewModel: ObservableObject {
     }
     
     private func resetToStart(assessmentManager: AssessmentManager) {
-        assessmentManager.endExamLockdown()
+        assessmentManager.endExamSession()
         submissionSuccess = false
         showSubmitConfirmation = false
         gridPageCount = 1

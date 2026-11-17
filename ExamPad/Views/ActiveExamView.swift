@@ -26,40 +26,13 @@ struct ActiveExamView: View {
         VStack(spacing: 0) {
             // Persistent Top Menu (with larger Exam Details header + extra spacing above tools)
             VStack(spacing: 14) {
-                // Top Row: Exam Details & Live Lockdown Status Badge
+                // Top Row: Exam Details
                 HStack(alignment: .center, spacing: 12) {
                     Text(viewModel.examTitle)
                         .font(.system(size: 21, weight: .bold))
                         .foregroundColor(.primary)
                     
                     Spacer()
-                    
-                    // Live Lockdown Status Pill (verifies lockdown state & tamper count on device)
-                    HStack(spacing: 6) {
-                        Image(systemName: assessmentManager.isExamLocked ? "lock.shield.fill" : "lock.open.fill")
-                            .font(.system(size: 13, weight: .semibold))
-                            .foregroundColor(
-                                assessmentManager.tamperViolationCount > 0
-                                ? .orange
-                                : (assessmentManager.isExamLocked ? .green : .secondary)
-                            )
-                        
-                        Text(
-                            assessmentManager.tamperViolationCount > 0
-                            ? "Lockdown Active (\(assessmentManager.tamperViolationCount) exit\(assessmentManager.tamperViolationCount == 1 ? "" : "s") logged)"
-                            : (assessmentManager.isExamLocked ? "Exam Lockdown Active" : "Unlocked")
-                        )
-                        .font(.system(size: 12, weight: .semibold))
-                        .foregroundColor(.secondary)
-                    }
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 5)
-                    .background(Color(UIColor.secondarySystemGroupedBackground))
-                    .clipShape(Capsule())
-                    .overlay(
-                        Capsule()
-                            .stroke(Color.primary.opacity(0.1), lineWidth: 1)
-                    )
                 }
                 
                 // Bottom Row: Drawing Tools, Undo/Redo, and Side Menu Toggle
@@ -414,86 +387,15 @@ struct ActiveExamView: View {
                 }
             }
         }
-        .blur(radius: assessmentManager.isAppInactiveDuringExam ? 18 : 0)
         .edgesIgnoringSafeArea(.bottom)
         .statusBarHidden(true)
         .persistentSystemOverlays(.hidden)
         .onAppear {
-            if !assessmentManager.isExamLocked {
-                assessmentManager.beginExamLockdown()
+            viewModel.configureAssessmentCallbacks(assessmentManager: assessmentManager)
+            if !assessmentManager.isExamActive {
+                assessmentManager.beginExamSession()
             }
         }
-        .overlay(
-            // Security Blur Shield when app switcher / Control Center is opened
-            Group {
-                if assessmentManager.isAppInactiveDuringExam {
-                    ZStack {
-                        Color.black.opacity(0.65)
-                            .edgesIgnoringSafeArea(.all)
-                        VStack(spacing: 12) {
-                            Image(systemName: "lock.shield.fill")
-                                .font(.system(size: 52))
-                                .foregroundColor(.orange)
-                            Text("Exam Protected")
-                                .font(.title2)
-                                .fontWeight(.bold)
-                                .foregroundColor(.white)
-                            Text("Return to ExamPad immediately.")
-                                .font(.subheadline)
-                                .foregroundColor(.white.opacity(0.8))
-                        }
-                    }
-                }
-            }
-        )
-        .overlay(
-            // Tamper / Unauthorized Exit Warning Dialog
-            Group {
-                if assessmentManager.showTamperViolationAlert {
-                    Color.black.opacity(0.5)
-                        .edgesIgnoringSafeArea(.all)
-                    
-                    VStack(spacing: 18) {
-                        Image(systemName: "exclamationmark.triangle.fill")
-                            .font(.system(size: 48))
-                            .foregroundColor(.orange)
-                        
-                        VStack(spacing: 8) {
-                            Text("Exam Lockdown Warning")
-                                .font(.title3)
-                                .fontWeight(.bold)
-                            
-                            Text("Leaving the exam before submitting is not permitted. This event has been logged (\(assessmentManager.tamperViolationCount) violation\(assessmentManager.tamperViolationCount == 1 ? "" : "s")).")
-                                .font(.subheadline)
-                                .foregroundColor(.secondary)
-                                .multilineTextAlignment(.center)
-                        }
-                        
-                        Button(action: {
-                            assessmentManager.dismissTamperAlert()
-                        }) {
-                            Text("Return to Exam")
-                                .font(.subheadline)
-                                .fontWeight(.bold)
-                                .foregroundColor(.white)
-                                .frame(maxWidth: .infinity, minHeight: 44)
-                                .background(Color.examButton)
-                                .cornerRadius(10)
-                        }
-                        .buttonStyle(.plain)
-                    }
-                    .padding(28)
-                    .frame(width: 370)
-                    .background(Color(UIColor.secondarySystemGroupedBackground))
-                    .cornerRadius(18)
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 18)
-                            .stroke(Color.orange.opacity(0.4), lineWidth: 1.5)
-                    )
-                    .shadow(color: .black.opacity(0.3), radius: 16, x: 0, y: 8)
-                }
-            }
-        )
         .overlay(
             // Submission Confirmation Dialog
             Group {

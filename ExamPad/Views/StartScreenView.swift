@@ -16,8 +16,7 @@ struct StartScreenView: View {
                 .foregroundColor(Color.examTitle)
             
             Button(action: {
-                // Mocks the QR scanning flow, locks down the device & notifications, and enters the exam
-                viewModel.mockScanAndStart(assessmentManager: assessmentManager)
+                viewModel.navigateToQRScanner()
             }) {
                 HStack {
                     Image(systemName: "qrcode.viewfinder")
